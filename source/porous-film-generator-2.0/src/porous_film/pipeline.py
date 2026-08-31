@@ -70,6 +70,7 @@ from porous_film.parallel import (
 )
 from porous_film.parallel.seeds import SeedTask, SeedTaskResult, _execute_seed_body
 from porous_film.reporting.markdown import write_preflight_report, write_run_report
+from porous_film.reporting.visual import write_visual_report
 from porous_film.storage import (
     TaskPaths,
     create_task_directory,
@@ -933,6 +934,16 @@ def _write_geometry_artifacts(config: GeneratorConfig, run: GeometryRun) -> None
     _write_main_metrics(config, run, None)
     _write_unit_metrics(run.built, run.paths.qa_export / "main_unit_metrics.csv")
     _write_channel_curves(run.built, run.paths.qa_export / "channel_curves.h5")
+    if config.output.write_plots:
+        write_visual_report(
+            run.paths.outputs / "visual-report" / "index.html",
+            config=config,
+            built=run.built,
+            grid=run.phase_grid,
+            audit=run.audit,
+            candidates=run.candidate_results,
+            selected_sequence_index=run.selected_candidate.sequence_index,
+        )
     write_qa_contract(
         _qa_contract(config, run.phase_grid),
         run.paths.qa_export,
