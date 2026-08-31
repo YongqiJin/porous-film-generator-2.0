@@ -12,12 +12,13 @@ initial handoff baseline.
 cd ~/project/porous-film-generator-2.0/source/porous-film-generator-2.0
 uv sync --frozen --all-groups
 uv run porous-film generate-geometry \
-  --config ../../examples/configs/v2-A01-dispersed-worms.yaml \
+  --config ../../examples/configs/quick-visual-demo.yaml \
   --result-root ../../runs
 ```
 
-The A01 example is a full 3 × 3 × 0.6 μm visual example and can take tens of minutes. It is a
-known audit-failing visualization input, not a scientifically feasible reference case.
+The quick visual demo is intentionally small and is intended to verify installation, geometry
+generation, and report rendering. The A01–A03 examples are larger visual examples and can take tens
+of minutes; they are known audit-failing inputs, not scientifically feasible reference cases.
 
 Each run with `output.write_plots: true` writes a self-contained report to:
 

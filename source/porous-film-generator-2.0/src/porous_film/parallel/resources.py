@@ -56,8 +56,12 @@ def _parse_cpu_list(value: str) -> set[int]:
 def _allowed_logical_cpus() -> set[int]:
     if hasattr(os, "sched_getaffinity"):
         return set(os.sched_getaffinity(0))
-    affinity = psutil.Process().cpu_affinity()
-    return set(affinity or range(psutil.cpu_count(logical=True) or 1))
+    process = psutil.Process()
+    if hasattr(process, "cpu_affinity"):
+        affinity = process.cpu_affinity()
+        if affinity:
+            return set(affinity)
+    return set(range(psutil.cpu_count(logical=True) or 1))
 
 
 def discover_resources(

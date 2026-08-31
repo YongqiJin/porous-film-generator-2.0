@@ -1,0 +1,58 @@
+schema_version: 3
+task:
+  name: quick-visual-demo
+  random_seed: 29
+film:
+  target_box_A: {x: 40.0, y: 40.0, z: 20.0}
+formal_targets:
+  position_quantity:
+    center_distance_xy:
+      components: []
+  shape:
+    equivalent_diameter_A: {family: constant, value: 8.0}
+    orientation:
+      model: paired_projected_planes
+      components:
+        - weight: 1.0
+          theta_xz_deg: {family: beta, alpha: 2.0, beta: 2.0, lower: 60.0, upper: 90.0}
+          theta_xy_deg: {family: beta, alpha: 2.0, beta: 2.0, lower: 0.0, upper: 30.0}
+    channel_aspect_ratio: {family: constant, value: 4.0}
+    channel_tortuosity: {family: constant, value: 1.1}
+    curvature_fluctuation: {family: constant, value: 0.2}
+  proportion:
+    porosity: 0.10
+generation_controls:
+  seed_number_density_A3: 3.125e-5
+  channel_fraction_by_count: 1.0
+  channel_to_compact_mean_volume_ratio: 1.0
+measurement:
+  z_slice_spacing_A: 2.0
+  center_min_separation_A: 2.0
+  center_tracking_max_displacement_A: 4.0
+  center_distance_bin_width_A: 2.0
+  center_distance_reference_samples: 1024
+  centerline_sample_spacing_A: 2.0
+  cross_section_spacing_A: 2.0
+  boundary_resample_spacing_A: 1.0
+  curvature_smoothing_length_A: 1.0
+  branch_exclusion_length_A: 2.0
+  surface_exclusion_length_A: 2.0
+  orientation_projection_min_fraction: 0.05
+matrix_constraints:
+  enabled: false
+  require_x_percolation: false
+  minimum_cross_section_fraction: 0.0
+  maximum_overlap_fraction: 1.0
+audit:
+  enabled: false
+  candidate_count_per_round: 1
+  maximum_rounds: 1
+  coarse_spacing_A: 4.0
+  fine_spacing_A: 2.0
+output:
+  root: runs
+  write_plots: true
+parallel:
+  enabled: false
+  strategy: serial
+  worker_threads: 1
