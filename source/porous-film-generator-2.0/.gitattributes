@@ -1,0 +1,7 @@
+.gitattributes text eol=lf
+deployment/dpdispatcher/*.patch text eol=lf
+deployment/server/*.sh text eol=lf
+deployment/server/*.py text eol=lf
+deployment/server/*.yaml text eol=lf
+deployment/submissions/*.json text eol=lf
+deployment/submissions/*.ps1 text eol=lf

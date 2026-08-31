@@ -1,0 +1,79 @@
+{
+  "audit_passed": false,
+  "candidate_records": [
+    {
+      "audit_passed": false,
+      "failure_message": null,
+      "failure_type": null,
+      "identity": {
+        "candidate_index": 0,
+        "derived_random_seed": 503379356,
+        "round_index": 0,
+        "seed": 21003,
+        "sequence_index": 0
+      },
+      "porosity": 0.29032407407407407,
+      "scale": 1.028125,
+      "succeeded": true,
+      "wall_time_seconds": 655.4395587870385,
+      "warnings": [
+        "equivalent_diameter final-geometry measurement has no valid samples",
+        "theta_xz final-geometry measurement has no valid samples",
+        "theta_xy final-geometry measurement has no valid samples",
+        "channel_eta final-geometry measurement has no valid samples",
+        "channel_tau final-geometry measurement has no valid samples",
+        "curvature_fluctuation final-geometry measurement has no valid samples",
+        "center_distance_xy comparison exceeds audit limit"
+      ]
+    }
+  ],
+  "candidate_wall_time_sum_seconds": 655.4395587870385,
+  "config": "../configs/v2-A03-fine-dispersed.yaml",
+  "config_sha256": "3bdb25902d55638dfb16deed369f66c789767802a71aa6b0a344f31a39ffe276",
+  "cpu_time_seconds": 1302.6955226260002,
+  "ended_at": "2026-08-28T20:22:02.654865+08:00",
+  "expected_unit_count": 49,
+  "g_xy_pair_count": 0,
+  "hashed_file_count": 66,
+  "historical_package_version": "0.4.0.dev1",
+  "hostname": "<REDACTED>",
+  "official_generator_version": "2.0",
+  "output": "<REMOTE_OUTPUT_REDACTED>",
+  "peak_rss_mib": 3919.6484375,
+  "pid": 2529358,
+  "pipeline_status": "completed_infeasible",
+  "porosity": 0.29032407407407407,
+  "preflight": {
+    "errors": [],
+    "estimated_memory_bytes": 1771200,
+    "estimated_voxels": 43200,
+    "passed": true,
+    "warnings": []
+  },
+  "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "random_seed": 21003,
+  "schema_version": 1,
+  "selected_candidate": {
+    "candidate_index": 0,
+    "derived_random_seed": 503379356,
+    "round_index": 0,
+    "seed": 21003,
+    "sequence_index": 0
+  },
+  "stage_seconds": {
+    "config_load": 0.006142263999208808,
+    "generation_total": 1302.7164475580212,
+    "hashing": 0.0144483158364892,
+    "independent_validation": 17.932323266984895,
+    "preflight": 0.010528372833505273
+  },
+  "started_at": "2026-08-28T20:00:01.986067+08:00",
+  "status": "completed_validation_failed",
+  "task_name": "v2-A03-fine-dispersed",
+  "through_centerline_count": 0,
+  "validator_exit_code": 1,
+  "validator_status": "FAIL",
+  "validator_stderr": "ERROR: schema-v3 target equivalent_diameter_A does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target theta_xz_deg does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target theta_xy_deg does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target channel_eta does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target channel_tau does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target curvature_fluctuation does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target g_xy does not match independent final_phase measurements: weighted_loss=inf, pair_count=0",
+  "validator_stdout": "FAIL",
+  "wall_time_seconds": 1320.6839796078857
+}

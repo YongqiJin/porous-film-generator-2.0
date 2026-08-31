@@ -1,0 +1,14 @@
+                                                                               
+ Usage: porous-film generate [OPTIONS]                                         
+                                                                               
++- Options -------------------------------------------------------------------+
+| *  --config             <file>              [required]                      |
+|    --result-root        <path>              Root for dated calculation      |
+|                                             output directories.             |
+|                                             [default:                       |
+|                                             C:\Calculation_results]         |
+|    --workers            <int range> [x>=1]  Maximum worker processes.       |
+|    --no-parallel                            Force serial execution.         |
+|    --help                                   Show this message and exit.     |
++-----------------------------------------------------------------------------+
+

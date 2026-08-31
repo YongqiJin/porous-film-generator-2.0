@@ -1,0 +1,40 @@
+=== RUN 1 ===
+.                                                                        [100%]
+1 passed in 5.21s
+exit=0
+=== RUN 2 ===
+F                                                                        [100%]
+================================== FAILURES ===================================
+___________ test_broken_pool_error_keeps_completed_results_ordered ____________
+
+    def test_broken_pool_error_keeps_completed_results_ordered() -> None:
+        callbacks: list[str] = []
+        with (
+            spawn_pool(worker_count=3, worker_threads=1) as executor,
+            pytest.raises(ParallelPoolError) as exc_info,
+        ):
+            assert executor is not None
+            run_spawn_tasks(
+                [ProbeTask(2), ProbeTask(0), ProbeTask(1)],
+                pool_error_probe,
+                worker_count=3,
+                worker_threads=1,
+                executor=executor,
+                result_callback=callbacks.append,
+            )
+    
+>       assert exc_info.value.completed_results == ("done-0", "done-2")
+E       AssertionError: assert ('done-0',) == ('done-0', 'done-2')
+E         
+E         Right contains one more item: 'done-2'
+E         Use -v to get more diff
+
+tests\test_parallel_runtime.py:190: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_parallel_runtime.py::test_broken_pool_error_keeps_completed_results_ordered
+1 failed in 5.64s
+exit=1
+=== RUN 3 ===
+.                                                                        [100%]
+1 passed in 4.87s
+exit=0

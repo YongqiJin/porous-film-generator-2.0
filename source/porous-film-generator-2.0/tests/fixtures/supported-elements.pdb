@@ -1,0 +1,7 @@
+HETATM    1 SE   MOL A   1       0.000   0.000   0.000  1.00  0.00          SE
+HETATM    2 F    MOL A   1       1.000   0.000   0.000  1.00  0.00           F
+HETATM    3 CL   MOL A   1       2.000   0.000   0.000  1.00  0.00          CL
+HETATM    4 BR   MOL A   1       3.000   0.000   0.000  1.00  0.00          BR
+HETATM    5 I    MOL A   1       4.000   0.000   0.000  1.00  0.00           I
+HETATM    6 SI   MOL A   1       5.000   0.000   0.000  1.00  0.00          SI
+END

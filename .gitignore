@@ -1,0 +1,18 @@
+.DS_Store
+**/.DS_Store
+
+# Local Python environments and caches
+**/.venv/
+**/__pycache__/
+**/.pytest-tmp/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/*.py[cod]
+
+# Local editor and temporary files
+**/.idea/
+**/.vscode/
+**/*~
+**/*.swp
+**/*.tmp

@@ -1,0 +1,331 @@
+audit:
+  available_memory_cap_bytes: null
+  candidate_count_per_round: 1
+  coarse_spacing_A: 2.0
+  enabled: false
+  fine_spacing_A: 1.0
+  interface_mixing_layer_fraction: 0.0
+  maximum_rounds: 1
+  orientation_aspect_ratio_tolerance: 1.0e-06
+center_distribution:
+  lattice: null
+  mode: rdf
+  position_jitter: 0.0
+  rdf: []
+channel:
+  aspect_ratio: null
+  eta:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 4.0
+  relative_volume:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 1.0
+  roughness:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 0.0
+  tau:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 1.1
+  tortuosity: null
+compact:
+  aspect_ratio:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 1.5
+  relative_volume:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 1.0
+  roughness:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 0.0
+film:
+  packing_box_A:
+    x: 10.0
+    y: 10.0
+    z: 10.0
+  target_box_A:
+    x: 10.0
+    y: 10.0
+    z: 10.0
+  z_padding_A: null
+formal_targets:
+  position_quantity:
+    center_distance_xy: null
+  proportion:
+    porosity: 0.12
+  shape:
+    channel_aspect_ratio:
+      family: constant
+      value: 2.3145717118463702
+    channel_tortuosity:
+      family: constant
+      value: 1.0
+    compact_aspect_ratio: null
+    curvature_fluctuation:
+      family: constant
+      value: 1.0222725014971201
+    equivalent_diameter_A:
+      family: constant
+      value: 3.888408362521876
+    orientation: null
+generation_controls:
+  channel_fraction_by_count: 1.0
+  channel_relative_volume:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 1.0
+  channel_roughness:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 0.0
+  channel_to_compact_mean_volume_ratio: 1.0
+  compact_relative_volume:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 1.0
+  compact_roughness:
+    alpha: null
+    beta: null
+    components: null
+    family: constant
+    k: null
+    loc: null
+    lower: null
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: null
+    value: 0.0
+  seed_number_density_A3: 0.001
+matrix_constraints:
+  enabled: false
+  maximum_overlap_fraction: 1.0
+  minimum_cross_section_fraction: 0.0
+  minimum_skeleton_thickness_A: null
+  require_x_percolation: false
+measurement:
+  boundary_resample_spacing_A: 0.5
+  branch_exclusion_length_A: 1.0
+  center_distance_bin_width_A: 1.0
+  center_distance_max_A: null
+  center_distance_reference_samples: 1024
+  center_min_separation_A: 1.0
+  center_tracking_max_displacement_A: 2.0
+  centerline_sample_spacing_A: 1.0
+  cross_section_spacing_A: 1.0
+  curvature_smoothing_length_A: 0.5
+  orientation_projection_min_fraction: 0.05
+  surface_exclusion_length_A: 1.0
+  z_slice_spacing_A: 1.0
+optimization:
+  seed_panel:
+  - 29
+orientation:
+  azimuth: uniform
+  distribution:
+    alpha: 2.0
+    beta: 2.0
+    components: null
+    family: beta
+    k: null
+    loc: null
+    lower: 0.3333333333333333
+    maximum: null
+    mean: null
+    minimum: null
+    mu: null
+    s: null
+    scale: null
+    shape: null
+    sigma: null
+    theta: null
+    upper: 0.5
+    value: null
+output:
+  root: runs
+  write_plots: true
+parallel:
+  cpu_fraction: 0.8
+  enabled: false
+  max_workers: null
+  memory_fraction: 0.75
+  sources:
+    enabled: config
+    max_workers: config
+    strategy: config
+  start_method: spawn
+  strategy: serial
+  worker_threads: 1
+pore_material: null
+pores:
+  channel_fraction_by_count: 1.0
+  channel_to_compact_mean_volume_ratio: 1.0
+  seed_number_density_A3: 0.001
+  target_porosity: 0.12
+schema_version: 3
+source_schema_version: 3
+task:
+  name: phase-field-only
+  random_seed: 29

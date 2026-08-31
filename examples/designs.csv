@@ -1,0 +1,11 @@
+﻿name,family,seed,target_porosity,seed_density_A3,expected_unit_count,channel_fraction,channel_volume_ratio,fine_spacing_A,coarse_spacing_A,config
+v2-A01-dispersed-worms,A,21001,0.28,8e-12,43,0.3,1.1,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-A01-dispersed-worms.yaml
+v2-A02-rounded-rods,A,21002,0.3,7.5e-12,40,0.36,1.15,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-A02-rounded-rods.yaml
+v2-A03-fine-dispersed,A,21003,0.3,9e-12,49,0.25,1.05,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-A03-fine-dispersed.yaml
+v2-A04-curved-islands,A,21004,0.33,6.5e-12,35,0.45,1.25,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-A04-curved-islands.yaml
+v2-A05-multiscale-dispersed,A,21005,0.35,8.5e-12,46,0.38,1.2,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-A05-multiscale-dispersed.yaml
+v2-B01-clustered-lobes,B,22001,0.35,5e-12,27,0.65,1.55,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-B01-clustered-lobes.yaml
+v2-B02-irregular-network,B,22002,0.38,4.5e-12,24,0.75,1.75,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-B02-irregular-network.yaml
+v2-B03-broad-bicontinuous,B,22003,0.4,5.5e-12,30,0.6,1.65,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-B03-broad-bicontinuous.yaml
+v2-B04-large-connected,B,22004,0.42,4e-12,22,0.85,2.0,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-B04-large-connected.yaml
+v2-B05-dense-irregular,B,22005,0.44,6e-12,32,0.7,1.8,500.0,1000.0,C:\Calculation_results\2026-08-28\python_results\porous-film-v2-reference-patterns-10\inputs\configs\v2-B05-dense-irregular.yaml

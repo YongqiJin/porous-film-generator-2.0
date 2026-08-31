@@ -1,0 +1,37 @@
+{
+  "date": "2026-08-31",
+  "environment": {
+    "os": "Windows 11 10.0.26200",
+    "python": "3.14.6",
+    "uv": "0.12.1",
+    "git": "2.53.0.windows.3"
+  },
+  "version_command": {
+    "command": "uv run --frozen porous-film version",
+    "exit_code": 0,
+    "output": "porous-film 0.4.0.dev1"
+  },
+  "ruff": {
+    "command": "uv run --frozen ruff check .",
+    "exit_code": 0,
+    "result": "All checks passed"
+  },
+  "build": {
+    "wheel": "passed",
+    "sanitized_sdist": "passed"
+  },
+  "pytest": {
+    "command": "uv run --frozen pytest -q",
+    "duration_seconds": 478.52,
+    "passed": 441,
+    "failed": 6,
+    "skipped": 5,
+    "overall": "failed"
+  },
+  "failed_tests": {
+    "deployment_environment": 5,
+    "parallel_timing_flaky": 1,
+    "parallel_isolated_reruns": "pass, fail, pass"
+  },
+  "heavy_tests": "5 skipped because POROUS_FILM_RUN_HEAVY=1 was not set"
+}

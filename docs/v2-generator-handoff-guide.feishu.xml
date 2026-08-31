@@ -1,0 +1,463 @@
+<title>v2孔生成器说明</title>
+<callout emoji="📌" background-color="light-blue" border-color="blue"><p><b>用途：</b>本文件是 Porous Film Generator 2.0 的外部代码审查与二次开发主文档。它同时说明研究参数、实际输入、生成算法、最终结构审核、安装运行、输出文件、已知缺口和建议改造顺序。</p><p><b>适用版本：</b>官方版本 2.0；Git 标签 2.0；维护分支 release/2.0；提交 1c9a10793e96437202482ec44e4263b87ef64882；源码内历史包版本 0.4.0.dev1。</p><p><b>核对日期：</b>2026年8月31日（Asia/Shanghai）。</p></callout>
+
+<h1 seq="auto">交接范围与一句话结论</h1>
+<p>Porous Film Generator 2.0 是一个基于“离散孔生成单元 + 有符号距离场 + 体素化”的三维薄膜孔结构生成器。它在原始版本的基础上增加了多叶紧凑孔、三维多弯变截面通道，并把主要审核改成从最终二值孔相重新测量，而不是直接相信生成时抽到的参数。</p>
+<ul>
+<li><b>它是什么：</b>可复现的 CPU 科学几何生成与审核程序，支持多候选、多随机种子、GLB/HDF5/CSV/JSON 输出和独立验证器。</li>
+<li><b>它不是什么：</b>不是 v3 的原生连续相场孔网络生成器；不是贝叶斯优化器；不是 GROMACS、Packmol 或输运计算程序；当前代码也不使用 GPU 加速。</li>
+<li><b>正式推荐工作流：</b>只给真实 <code>target_box_A</code>，生成孔相后从 <code>final_phase.h5</code> 重测参数。PDB、Packmol、packing box 和 z padding 只保留旧流程兼容能力。</li>
+<li><b>重要现实状态：</b>v2 已实现复杂单元和最终相测量框架，但“同时满足全部输入分布”仍不成熟。2026年8月28日的三个可视化示例均生成了 GLB，但严格审核均失败，因此这些 GLB 只能用于观察形状，不能作为合格科学样本。</li>
+</ul>
+<p>研究参数口径参考 <cite type="doc" doc-id="DL33diGBooDWj8xlyKxcX9Mznzg"/> 和 <cite type="doc" doc-id="FrNVdN3VaoGfS7xDRe7c7NSGnTc"/>。本文件不修改《字节报告0821》。</p>
+
+<h1 seq="auto">版本身份与冻结规则</h1>
+<table><colgroup><col width="180"/><col width="610"/></colgroup><thead><tr><th background-color="light-gray"><p>项目</p></th><th background-color="light-gray"><p>固定值</p></th></tr></thead><tbody>
+<tr><td><p>正式名称</p></td><td><p>Porous Film Generator 2.0 — Complex Shapes</p></td></tr>
+<tr><td><p>Git 标签</p></td><td><p><code>2.0</code>，不可移动、不可覆盖</p></td></tr>
+<tr><td><p>维护分支</p></td><td><p><code>release/2.0</code></p></td></tr>
+<tr><td><p>提交</p></td><td><p><code>1c9a10793e96437202482ec44e4263b87ef64882</code></p></td></tr>
+<tr><td><p>Python 包版本</p></td><td><p><code>0.4.0.dev1</code>。这是历史内部版本号，不应再用于判断 v1/v2/v3。</p></td></tr>
+<tr><td><p>基线关系</p></td><td><p>从标签 <code>1.0</code> / 历史别名 <code>original-v0.2.0</code> 演进而来；与 v3 的相场孔网络路线分开。</p></td></tr>
+<tr><td><p>二次开发起点</p></td><td><p>从 <code>2.0</code> 新建分支；不得移动标签，不得把修改直接写回标签快照。</p></td></tr>
+</tbody></table>
+<p>从 1.0 到 2.0 共涉及 40 个文件，约新增 11033 行、删除 761 行。核心新增文件是 <code>geometry/complex_shapes.py</code> 和 <code>metrics/final_geometry.py</code>；独立验证器也大幅扩展。</p>
+
+<h1 seq="auto">需求演变：最初希望的参数、后来确认的参数、v2实际实现</h1>
+<h2 seq="auto">最初设计中的参数</h2>
+<p>2026年8月12日的初版设计把“每个生成单元”作为主要对象。输入大致分为：</p>
+<ul>
+<li>总体：生成单元体密度 <latex>\lambda_{seed}</latex>、孔隙率 <latex>\Phi</latex>、通道单元比例 <latex>f_{channel}</latex>、通道与紧凑单元平均体积比 <latex>R_V</latex>。</li>
+<li>位置：生成单元中心的三维 RDF，或规则点阵加扰动。</li>
+<li>大小：紧凑孔与通道孔各自的相对生成单元体积分布。</li>
+<li>方向：一个孔轴与 x 方向的夹角，绕 x 方位角均匀。</li>
+<li>形状：紧凑孔长宽比、通道长细比、通道曲折度。</li>
+<li>表面：roughness，初版曾希望它直接代表表面积增量或曲率变化。</li>
+<li>硬约束：半导体沿 x 贯通、任意 yz 截面不能被切断、可选最小骨架厚度。</li>
+<li>分子流程：目标盒、冗余盒、孔相材料 PDB、密度或分子数，以及 Packmol 交接。</li>
+</ul>
+<p>这一口径的问题是：多个生成单元会重叠、合并、被边界裁剪，生成单元的体积、中心、方向和数量不再等于最终连通孔的实测结果。</p>
+
+<h2 seq="auto">后来确认的正式研究参数</h2>
+<p>经过逐项确认后，正式参数仍按“位置—数量、形状、占比”三类组织，但对象改为最终三维孔相：</p>
+<table><colgroup><col width="125"/><col width="210"/><col width="455"/></colgroup><thead><tr><th background-color="light-gray"><p>维度</p></th><th background-color="light-gray"><p>正式参数</p></th><th background-color="light-gray"><p>最终物理含义</p></th></tr></thead><tbody>
+<tr><td><p>位置—数量</p></td><td><p><code>g_xy(r)</code></p></td><td><p>同一 z 截面中，不同贯通孔中心线之间的周期 xy 距离分布，沿整个厚度汇总。</p></td></tr>
+<tr><td><p>形状</p></td><td><p><code>p_D(D_eq)</code></p></td><td><p>沿最终通孔中心线的法向截面等效直径分布。</p></td></tr>
+<tr><td><p>形状</p></td><td><p><code>p_ori(theta_xz, theta_xy)</code></p></td><td><p>同一三维孔轴在 xz 与 xy 平面的成对投影角分布。</p></td></tr>
+<tr><td><p>形状</p></td><td><p><code>p_eta,c</code></p></td><td><p>最终紧凑孔的主轴尺寸与两个横向尺寸几何平均值之比。</p></td></tr>
+<tr><td><p>形状</p></td><td><p><code>p_eta,ch</code></p></td><td><p>最终通道中心线弧长除以通道级等效直径。</p></td></tr>
+<tr><td><p>形状</p></td><td><p><code>p_tau</code></p></td><td><p>最终通道中心线弧长除以端点直线距离。</p></td></tr>
+<tr><td><p>形状</p></td><td><p><code>p_kappa(w)</code></p></td><td><p>最终法向截面边界曲率的相对波动分布。</p></td></tr>
+<tr><td><p>占比</p></td><td><p><code>Phi_V</code></p></td><td><p>真实目标盒内最终孔相体积分数。</p></td></tr>
+</tbody></table>
+<p>生成单元数量密度、通道标签比例、单元相对体积、roughness 幅度、叶瓣数、控制点和形状种子被降为内部控制量或诊断量。它们可以帮助造孔，但不能直接证明最终孔结构正确。</p>
+
+<h2 seq="auto">v2代码的实际对应关系</h2>
+<table><colgroup><col width="165"/><col width="245"/><col width="245"/><col width="175"/></colgroup><thead><tr><th background-color="light-gray"><p>参数</p></th><th background-color="light-gray"><p>实际输入路径</p></th><th background-color="light-gray"><p>最终测量</p></th><th background-color="light-gray"><p>当前状态</p></th></tr></thead><tbody>
+<tr><td><p>孔隙率</p></td><td><p><code>formal_targets.proportion.porosity</code></p></td><td><p><code>mean(final_phase.pore_mask)</code></p></td><td><p>已实现并参与通过判定。</p></td></tr>
+<tr><td><p>中心距离</p></td><td><p><code>formal_targets.position_quantity.center_distance_xy.components</code></p></td><td><p>最终贯通中心线在同一 z 层的周期 xy 距离。</p></td><td><p>已实现；样本少或无贯通线时会失败。</p></td></tr>
+<tr><td><p>局部等效直径</p></td><td><p><code>formal_targets.shape.equivalent_diameter_A</code></p></td><td><p>最终贯通中心线法向截面的面积等效直径。</p></td><td><p>最终审核已实现；生成阶段该目标只直接用于通道单元。</p></td></tr>
+<tr><td><p>双平面取向</p></td><td><p><code>formal_targets.shape.orientation.components</code></p></td><td><p>最终中心线端到端轴的 <code>theta_xz</code> 与 <code>theta_xy</code>。</p></td><td><p>两个边缘分布分别审核；尚未审核二者的联合配对关系。</p></td></tr>
+<tr><td><p>紧凑孔长宽比</p></td><td><p><code>formal_targets.shape.compact_aspect_ratio</code></p></td><td><p>设计要求是最终紧凑孔分类后测量。</p></td><td><p>当前 schema v3 审核未实现该最终测量，实际返回 <code>compact_eta_result=null</code>。</p></td></tr>
+<tr><td><p>通道长细比</p></td><td><p><code>formal_targets.shape.channel_aspect_ratio</code></p></td><td><p><code>L_arc / D_channel</code></p></td><td><p>已实现并参与通过判定。</p></td></tr>
+<tr><td><p>通道曲折度</p></td><td><p><code>formal_targets.shape.channel_tortuosity</code></p></td><td><p><code>L_arc / L_end</code></p></td><td><p>已实现并参与通过判定。</p></td></tr>
+<tr><td><p>曲率波动</p></td><td><p><code>formal_targets.shape.curvature_fluctuation</code></p></td><td><p>最终法向截面边界的 <code>std(kappa)/abs(mean(kappa))</code>。</p></td><td><p>审核已实现；生成映射仍是经验函数，尚未标定。</p></td></tr>
+<tr><td><p>生成单元密度</p></td><td><p><code>generation_controls.seed_number_density_A3</code></p></td><td><p>只报告最终中心/轨迹数量。</p></td><td><p>内部控制，不要求同值。</p></td></tr>
+<tr><td><p>单元类型与相对体积</p></td><td><p><code>generation_controls.channel_fraction_by_count</code> 等</p></td><td><p>只作生成溯源和诊断。</p></td><td><p>不属于正式最终参数。</p></td></tr>
+</tbody></table>
+
+<h1 seq="auto">输入文件：单位、结构和完整示例</h1>
+<h2 seq="auto">基本规则</h2>
+<ul>
+<li>配置为严格 YAML 映射；未知字段会被拒绝。</li>
+<li>长度统一用 Å；1 nm = 10 Å，1 μm = 10000 Å。</li>
+<li>公开取向输入用度；内部旋转计算用弧度。</li>
+<li>比例和概率无量纲；混合权重必须非负且总和为 1。</li>
+<li>正式 schema 版本写 <code>schema_version: 3</code>。软件正式版本仍称 2.0，这两个数字不是同一层级。</li>
+<li>标准几何工作流只要求 <code>target_box_A</code>；不需要 PDB、packing box 或 z padding。</li>
+</ul>
+
+<h2 seq="auto">顶层配置块</h2>
+<table><colgroup><col width="185"/><col width="190"/><col width="420"/></colgroup><thead><tr><th background-color="light-gray"><p>配置块</p></th><th background-color="light-gray"><p>角色</p></th><th background-color="light-gray"><p>说明</p></th></tr></thead><tbody>
+<tr><td><p><code>task</code></p></td><td><p>运行身份</p></td><td><p><code>name</code> 和整数 <code>random_seed</code>。</p></td></tr>
+<tr><td><p><code>film</code></p></td><td><p>物理盒</p></td><td><p><code>target_box_A{x,y,z}</code>；兼容字段 <code>packing_box_A</code>/<code>z_padding_A</code> 仅供旧分子流程。</p></td></tr>
+<tr><td><p><code>formal_targets</code></p></td><td><p>正式研究目标</p></td><td><p>位置—数量、形状、占比三类目标，必须由最终孔相按同义定义测量。</p></td></tr>
+<tr><td><p><code>generation_controls</code></p></td><td><p>内部造孔控制</p></td><td><p>种子密度、孔型比例、相对体积和起始 roughness。</p></td></tr>
+<tr><td><p><code>measurement</code></p></td><td><p>测量协议</p></td><td><p>固定采样间距、中心追踪阈值、截面重采样和曲率平滑尺度；同一研究批次应固定。</p></td></tr>
+<tr><td><p><code>matrix_constraints</code></p></td><td><p>半导体硬约束</p></td><td><p>x 贯通、最小 yz 截面、可选骨架厚度和重叠上限。</p></td></tr>
+<tr><td><p><code>audit</code></p></td><td><p>候选与网格</p></td><td><p>候选数、轮数、粗/细体素间距和内存上限。</p></td></tr>
+<tr><td><p><code>optimization</code></p></td><td><p>重复种子</p></td><td><p><code>seed_panel</code> 用于估计随机波动；不提供外部优化算法。</p></td></tr>
+<tr><td><p><code>parallel</code></p></td><td><p>CPU 并行</p></td><td><p><code>auto/seeds/candidates/serial</code>；每个 worker 固定 1 个数值线程。</p></td></tr>
+<tr><td><p><code>pore_material</code></p></td><td><p>旧分子流程</p></td><td><p>可选 PDB，加目标密度或精确分子数二选一。</p></td></tr>
+</tbody></table>
+
+<h2 seq="auto">支持的分布</h2>
+<table><colgroup><col width="155"/><col width="270"/><col width="370"/></colgroup><thead><tr><th background-color="light-gray"><p>family</p></th><th background-color="light-gray"><p>常用参数</p></th><th background-color="light-gray"><p>说明</p></th></tr></thead><tbody>
+<tr><td><p><code>constant</code></p></td><td><p><code>value</code></p></td><td><p>所有样本固定为一个值。</p></td></tr>
+<tr><td><p><code>lognormal</code></p></td><td><p><code>sigma/s</code>，<code>scale</code> 或 <code>mean/mu</code>，可选 <code>loc</code></p></td><td><p>正偏分布。</p></td></tr>
+<tr><td><p><code>gamma</code></p></td><td><p><code>alpha/shape/k</code>，<code>scale/theta</code>，可选 <code>loc</code></p></td><td><p>正值连续分布。</p></td></tr>
+<tr><td><p><code>weibull</code></p></td><td><p><code>shape/k/alpha</code>，<code>scale</code>，可选 <code>loc</code></p></td><td><p>实现别名 <code>weibull_min</code>。</p></td></tr>
+<tr><td><p><code>truncated_normal</code></p></td><td><p><code>mean</code>、<code>sigma/s</code>、<code>lower</code>、<code>upper</code></p></td><td><p>截断正态；别名 <code>truncnorm</code>。</p></td></tr>
+<tr><td><p><code>beta</code></p></td><td><p><code>alpha</code>、<code>beta</code>、<code>lower</code>、<code>upper</code></p></td><td><p>有界分布；取向分量必须使用 Beta。</p></td></tr>
+<tr><td><p><code>mixture</code></p></td><td><p><code>components[{weight,family,...}]</code></p></td><td><p>解析分布线性组合；不支持表格 PDF/CDF/直方图。</p></td></tr>
+</tbody></table>
+<p>有限样本不是简单独立随机抽取：程序先按最大余数法给各混合分量分配整数样本数，再在每个分量内做分层分位点抽样，因此同一 seed 可复现，小样本下也尽量保持混合权重。</p>
+
+<h2 seq="auto">测量协议默认值</h2>
+<table><colgroup><col width="285"/><col width="120"/><col width="330"/></colgroup><thead><tr><th background-color="light-gray"><p>字段</p></th><th background-color="light-gray"><p>默认值</p></th><th background-color="light-gray"><p>作用</p></th></tr></thead><tbody>
+<tr><td><p><code>z_slice_spacing_A</code></p></td><td><p>1.0</p></td><td><p>沿厚度抽取 xy 截面的间距。</p></td></tr>
+<tr><td><p><code>center_min_separation_A</code></p></td><td><p>2.0</p></td><td><p>同一截面中两个中心的最小分离尺度。</p></td></tr>
+<tr><td><p><code>center_tracking_max_displacement_A</code></p></td><td><p>4.0</p></td><td><p>相邻截面中心可连接为同一轨迹的最大 xy 位移。</p></td></tr>
+<tr><td><p><code>center_distance_bin_width_A</code></p></td><td><p>1.0</p></td><td><p><code>g_xy(r)</code> 的距离分箱宽度。</p></td></tr>
+<tr><td><p><code>center_distance_reference_samples</code></p></td><td><p>4096</p></td><td><p>均匀随机参考的 Sobol 样本数。</p></td></tr>
+<tr><td><p><code>centerline_sample_spacing_A</code></p></td><td><p>2.0</p></td><td><p>中心线重采样间距。</p></td></tr>
+<tr><td><p><code>cross_section_spacing_A</code></p></td><td><p>2.0</p></td><td><p>法向截面沿弧长的间距。</p></td></tr>
+<tr><td><p><code>boundary_resample_spacing_A</code></p></td><td><p>0.5</p></td><td><p>截面边界重采样间距。</p></td></tr>
+<tr><td><p><code>curvature_smoothing_length_A</code></p></td><td><p>1.0</p></td><td><p>计算曲率前的平滑长度。</p></td></tr>
+<tr><td><p><code>branch_exclusion_length_A</code></p></td><td><p>2.0</p></td><td><p>分支/合并附近剔除范围。</p></td></tr>
+<tr><td><p><code>surface_exclusion_length_A</code></p></td><td><p>2.0</p></td><td><p>上下表面附近剔除范围。</p></td></tr>
+<tr><td><p><code>orientation_projection_min_fraction</code></p></td><td><p>0.05</p></td><td><p>投影过小时把对应角标成不可辨识。</p></td></tr>
+</tbody></table>
+<callout emoji="⚠️" background-color="light-yellow" border-color="orange"><p>这些默认值只是软件默认，不是适用于微米级薄膜的推荐物理值。实际值必须与体素间距、最小孔径、膜厚和中心线弯曲尺度协调，并在同一优化批次中固定。</p></callout>
+
+<h2 seq="auto">可直接运行的 schema v3 示例</h2>
+<pre lang="yaml" caption="示例数字只演示语法，不代表已标定物理参数"><code>schema_version: 3
+task:
+  name: through-pore-study
+  random_seed: 123
+film:
+  target_box_A: {x: 10000, y: 10000, z: 1500}
+formal_targets:
+  position_quantity:
+    center_distance_xy:
+      components:
+        - {kind: exclusion, amplitude: 0.9, center_A: 0, width_A: 300}
+        - {kind: peak, amplitude: 0.3, center_A: 900, width_A: 180}
+  shape:
+    equivalent_diameter_A:
+      {family: beta, alpha: 2.5, beta: 3.5, lower: 300, upper: 900}
+    orientation:
+      model: paired_projected_planes
+      components:
+        - weight: 1.0
+          theta_xz_deg:
+            {family: beta, alpha: 4, beta: 2, lower: 55, upper: 88}
+          theta_xy_deg:
+            {family: beta, alpha: 2, beta: 5, lower: 0, upper: 30}
+    compact_aspect_ratio:
+      {family: beta, alpha: 2, beta: 3, lower: 1, upper: 3}
+    channel_aspect_ratio:
+      {family: beta, alpha: 2, beta: 2, lower: 3, upper: 12}
+    channel_tortuosity:
+      {family: beta, alpha: 2, beta: 3, lower: 1, upper: 1.8}
+    curvature_fluctuation:
+      {family: beta, alpha: 2, beta: 5, lower: 0, upper: 0.8}
+  proportion:
+    porosity: 0.15
+generation_controls:
+  seed_number_density_A3: 8.0e-10
+  channel_fraction_by_count: 1.0
+  channel_to_compact_mean_volume_ratio: 1.0
+measurement:
+  z_slice_spacing_A: 25
+  center_min_separation_A: 50
+  center_tracking_max_displacement_A: 75
+  center_distance_bin_width_A: 50
+  center_distance_max_A: 5000
+  center_distance_reference_samples: 8192
+  centerline_sample_spacing_A: 25
+  cross_section_spacing_A: 25
+  boundary_resample_spacing_A: 10
+  curvature_smoothing_length_A: 25
+  branch_exclusion_length_A: 50
+  surface_exclusion_length_A: 50
+  orientation_projection_min_fraction: 0.05
+matrix_constraints:
+  enabled: true
+  require_x_percolation: true
+  minimum_cross_section_fraction: 0.10
+  maximum_overlap_fraction: 0.50
+audit:
+  enabled: true
+  candidate_count_per_round: 8
+  maximum_rounds: 4
+  coarse_spacing_A: 50
+  fine_spacing_A: 25
+parallel:
+  enabled: true
+  strategy: candidates
+  max_workers: 8
+  cpu_fraction: 0.8
+  memory_fraction: 0.75
+  worker_threads: 1
+  start_method: spawn</code></pre>
+
+<h1 seq="auto">孔结构的生成顺序</h1>
+<ol>
+<li><b>解析并标准化配置。</b>Pydantic 使用 <code>extra=forbid</code> 拒绝未知字段。旧 schema v2 可通过 <code>translate_schema_contract()</code> 转成内部 schema v3 视图。</li>
+<li><b>预检查。</b>检查目标盒、PDB（若提供）、种子数、候选数、粗细网格是否整除盒尺寸、预计体素数和内存。</li>
+<li><b>确定生成单元数。</b><code>N=round(seed_number_density_A3 × Lx × Ly × Lz)</code>。N 小于 1 直接失败，N 小于 5 给出分布样本不足警告。</li>
+<li><b>生成内部锚点。</b>RDF 模式先在盒中随机放点，再对单点做退火式随机移动；x/y 周期回卷，z 截断在上下表面。schema v3 使用绝对 xy 距离目标；每点约 24 次尝试。也保留 lattice_jitter 兼容模式。</li>
+<li><b>分配孔型。</b>按 <code>channel_fraction_by_count</code> 用最大余数法确定紧凑孔与通道孔的整数数量，再随机打乱标签。</li>
+<li><b>抽取尺寸和形状参数。</b>各分布采用分层分位点抽样；通道和紧凑孔相对体积先按类内比例分配。schema v3 还抽取通道绝对等效直径、成对取向和曲率波动目标。</li>
+<li><b>构造紧凑孔。</b>生成多叶局部轮廓，放到锚点并旋转到抽样方向。</li>
+<li><b>构造通道孔。</b>生成三维多弯中心线和变半径曲线，放到锚点并旋转。</li>
+<li><b>组成全局孔场。</b>每个单元提供有符号距离；所有单元用 smooth-min 合并。x/y 使用周期像，z 不周期。</li>
+<li><b>统一缩放求孔隙率。</b>在 0.1—10 的线性尺度区间内二分，最多 64 次；每次重新体素化，直到最终孔隙率进入网格容差。所有半径、叶瓣偏移、中心线相对锚点长度和半径曲线一起缩放，锚点位置不变。</li>
+<li><b>从最终体素孔相重建中心线。</b>逐 z 截面做周期距离变换，寻找局部最大内切距离点，再用相邻截面最小代价匹配追踪中心线；标记分支邻域和上下表面接触。</li>
+<li><b>测量并审核。</b>只用最终孔相计算孔隙率、<code>g_xy(r)</code>、法向截面直径、曲率、方向、通道 eta/tau、连通性、截面和局部厚度稳定性。</li>
+<li><b>选择候选并重放。</b>按固定顺序选择第一个全部通过的候选；若没有通过项，则选择“孔隙率最接近”的成功候选作为明确的不合格诊断结果。随后按同一候选身份重新生成，检查重放一致性。</li>
+<li><b>导出。</b>写出最终相位、中心线、截面、GLB/PLY、生成单元溯源、报告、哈希以及可选的优化交换文件。</li>
+</ol>
+
+<h1 seq="auto">复杂孔形状算法</h1>
+<h2 seq="auto">多叶紧凑孔</h2>
+<ul>
+<li>每个孔使用独立 <code>shape_seed</code>；最多尝试 16 次，失败时整个候选失败，不退回规则椭球。</li>
+<li>叶瓣数为 2、3、4，概率分别为 0.25、0.50、0.25。</li>
+<li>叶瓣相对尺度在 0.65—1.15；新叶瓣与父叶瓣中心距是两者标量半径和的 0.58—0.82，主动形成连通腰部。</li>
+<li>按体积权重归零重心，PCA 对齐主轴，再做仿射变换，使横向包络相同并使主轴/横轴比等于抽样 eta。</li>
+<li>叶瓣间使用尺度相关 smooth-min；平滑长度为最小横向叶瓣半径的 0.12。</li>
+<li>固定、无扰动 Sobol <code>2^15</code> 点估算体积，再统一缩放到目标体积。</li>
+<li>要求叶瓣连通、eta 误差不超过 5%、包络填充率 0.50—0.85。</li>
+</ul>
+<h2 seq="auto">三维多弯、变截面通道</h2>
+<ul>
+<li>使用 7 个控制点；局部主轴为 x，横向 y/z 由 1—3 阶正弦模式叠加，端点回到主轴。</li>
+<li>通过根求解横向振幅，使实际弧长/端距符合 tau。</li>
+<li>tau 大于 1.05 时要求至少两个弯折且中心线非平面。</li>
+<li>沿归一化弧长生成 7 个半径结点，使用 PCHIP 插值。</li>
+<li>半径变异系数限制为 0.15—0.30；局部半径约束在等效半径的 0.60—1.45；必须同时有鼓包与收颈。</li>
+<li>非相邻中心线段不得发生管体自交；最多重采样 16 次。</li>
+<li>SDF 使用共享角平分面拼接相邻段，只在全局两端加半球端帽。</li>
+<li>每段缓存累计弧长、端点半径、最大半径、局部坐标系和扩展 AABB；查询时先用 AABB 下界裁剪，减少完整距离计算。</li>
+</ul>
+<h2 seq="auto">roughness</h2>
+<p>roughness 在宏观多叶或通道轮廓形成后只施加一次。当前实现按 <code>unit_id</code> 派生四个正弦模式的幅度与相位。schema v3 的曲率目标先用经验映射 <code>roughness=min(0.25, 0.05 × target_curvature_fluctuation)</code> 转成起始扰动；最终仍以实测曲率波动判定。该映射不是已标定的反函数，是二次开发重点。</p>
+
+<h1 seq="auto">最终结构怎样测量与审核</h1>
+<h2 seq="auto">测量器只读最终相位</h2>
+<p><code>metrics/final_geometry.py</code> 的输入只有 <code>PhaseGrid</code> 和固定的 <code>MeasurementSpec</code>。它不读取目标分布、生成标签、抽样值、shape_seed 或生成器写出的单孔指标。这样可以避免“拿输入证明自己正确”。</p>
+<h2 seq="auto">主要测量定义</h2>
+<ul>
+<li><b>孔隙率：</b>孔体素数除以全部目标盒体素数。</li>
+<li><b>截面中心：</b>在每个抽样 z 层对孔相做周期距离变换，寻找局部距离峰，并按 <code>center_min_separation_A</code> 去重。</li>
+<li><b>中心线：</b>用周期 xy 距离和匈牙利匹配连接相邻层中心；同时接触最下与最上采样层的轨迹标为 through。</li>
+<li><b>中心距离：</b>仅在同一 z 层、不同 through 轨迹之间计算周期最短 xy 距离；用相同对数的 Sobol 均匀参考归一化。</li>
+<li><b>法向截面：</b>沿平滑后的中心线按物理弧长取点，在局部切向的法平面上三线性采样孔相，选择包含中心点的连通截面。</li>
+<li><b>等效直径：</b><latex>D_{eq}=2\sqrt{A_\perp/\pi}</latex>。</li>
+<li><b>曲率波动：</b>闭合边界按固定间距重采样并平滑后，计算 <latex>std(\kappa)/|mean(\kappa)|</latex>。</li>
+<li><b>取向：</b>用中心线首末点向量；<latex>\theta_{xz}=atan2(|n_z|,|n_x|)</latex>，<latex>\theta_{xy}=atan2(|n_y|,|n_x|)</latex>。</li>
+<li><b>通道 eta：</b><latex>L_{arc}/D_{channel}</latex>，其中 <latex>D_{channel}=2\sqrt{mean(A_\perp)/\pi}</latex>。</li>
+<li><b>通道 tau：</b><latex>L_{arc}/L_{end}</latex>。</li>
+</ul>
+<h2 seq="auto">比较方法和当前阈值</h2>
+<p>分布比较使用两个互补指标。KS 距离看累计分布最大差异；归一化 Wasserstein 距离看把一条分布搬到另一条分布所需的平均距离，再除以目标分布尺度。两者都越小越好。</p>
+<table><colgroup><col width="265"/><col width="155"/><col width="315"/></colgroup><thead><tr><th background-color="light-gray"><p>检查</p></th><th background-color="light-gray"><p>当前阈值</p></th><th background-color="light-gray"><p>代码位置</p></th></tr></thead><tbody>
+<tr><td><p>一般一维分布 KS</p></td><td><p>≤ 0.20</p></td><td><p><code>metrics/audit.py::_DISTRIBUTION_KS_LIMIT</code></p></td></tr>
+<tr><td><p>归一化 Wasserstein</p></td><td><p>≤ 0.20</p></td><td><p><code>metrics/audit.py::_DISTRIBUTION_WASSERSTEIN_LIMIT</code></p></td></tr>
+<tr><td><p><code>g_xy(r)</code> 加权均方损失</p></td><td><p>≤ 1.0</p></td><td><p><code>metrics/audit.py::_RDF_LOSS_LIMIT</code></p></td></tr>
+<tr><td><p>孔隙率绝对误差</p></td><td><p>≤ max(1/Nvox, 0.01)</p></td><td><p><code>metrics/audit.py::_porosity_tolerance</code></p></td></tr>
+<tr><td><p>常数通道 eta/tau 相对误差</p></td><td><p>单样本各自 ≤ 1%</p></td><td><p>特殊 constant 逻辑；同时仍要求 Wasserstein ≤ 0.20。</p></td></tr>
+<tr><td><p>复杂紧凑单元体积</p></td><td><p>独立误差 ≤ 3%</p></td><td><p>validator 对 unit schema v2 的检查。</p></td></tr>
+<tr><td><p>复杂通道单元体积</p></td><td><p>独立误差 ≤ 3%</p></td><td><p>validator 对 unit schema v2 的检查。</p></td></tr>
+</tbody></table>
+<p>结构约束还包括半导体 x 方向贯通、最小 yz 截面比例、可选最小骨架厚度、孔域数量、最大孔域比例、表面开口和局部厚度粗细网格稳定性。</p>
+<h2 seq="auto">独立验证器</h2>
+<p><code>porous_film_validator</code> 不导入主包 <code>porous_film</code>。它重新读取 HDF5/CSV/JSONL/GLB，复算最终相位、中心线、截面、正式分布、连通性、网格与 GLB 占据一致性、单元几何和可选分子信息，并校验 <code>checksums.sha256</code>。输出状态为 PASS、FAIL 或 NOT_EVALUABLE。</p>
+<callout emoji="⚠️" background-color="light-yellow" border-color="orange"><p>独立实现并不自动等于独立正确。主测量器与 validator 中存在大量镜像代码；外部审查应重点检查两者是否在相同错误假设下同步复制。</p></callout>
+
+<h1 seq="auto">候选搜索、并行与可复现性</h1>
+<ul>
+<li>候选总数 = <code>candidate_count_per_round × maximum_rounds</code>。</li>
+<li>父进程从任务 seed 派生每个候选 seed；候选 worker 使用 NumPy RNG，数值库线程固定为 1。</li>
+<li><code>parallel.strategy</code> 支持 <code>auto</code>、<code>seeds</code>、<code>candidates</code>、<code>serial</code>。</li>
+<li>并行仅跨候选或 seed；单个候选内部的体素/SDF/截面计算仍以 CPU 为主，GPU 不会自动加速。</li>
+<li>选择规则是按确定性顺序取第一个通过候选；若无候选通过，则从成功生成者中选孔隙率最接近目标的一项，并保留为不合格诊断。</li>
+<li>选中候选会在父流程中按同一 identity 重放，并比较孔隙率、尺度、审核状态和警告，以防 worker 与发布结果漂移。</li>
+<li><code>optimization.seed_panel</code> 可对同一设计点运行多个固定 seed，并汇总可行率、目标均值和方差。</li>
+</ul>
+
+<h1 seq="auto">安装与使用</h1>
+<h2 seq="auto">环境要求</h2>
+<ul>
+<li>Python ≥ 3.12；本次本机复核实际使用 CPython 3.14.6。</li>
+<li>推荐使用 uv 和仓库中的 <code>uv.lock</code>。</li>
+<li>主要依赖：NumPy、SciPy、scikit-image、h5py、trimesh、Pydantic、PyYAML、Typer、psutil、threadpoolctl、gemmi。</li>
+<li>生成器本体不需要 GPU；多核 CPU 和足够内存更重要。</li>
+</ul>
+<h2 seq="auto">从源码运行</h2>
+<pre lang="powershell"><code>cd porous-film-generator-2.0
+uv sync --frozen --all-groups
+uv run porous-film version
+uv run porous-film preflight --config .\examples\config.yaml --result-root C:\Calculation_results
+uv run porous-film generate-geometry --config .\examples\config.yaml --result-root C:\Calculation_results --workers 8
+uv run porous-film-validate C:\Calculation_results\YYYY-MM-DD\python_results\TASK\qa_export</code></pre>
+<h2 seq="auto">从 wheel 安装</h2>
+<pre lang="bash"><code>python -m venv .venv
+. .venv/bin/activate
+python -m pip install porous_film_generator-0.4.0.dev1-py3-none-any.whl
+porous-film version
+porous-film --help</code></pre>
+<h2 seq="auto">命令语义</h2>
+<ul>
+<li><code>preflight</code>：只做配置、网格、PDB、内存和样本量检查，并写预检查报告。</li>
+<li><code>generate-geometry</code>：生成与审核几何，写主要几何和 QA 产物；当前实现不会像完整 <code>generate</code> 一样保证写出全部优化交换 JSON。</li>
+<li><code>generate</code>：完整流程。若没有 <code>pore_material</code>，仍可生成几何和完整状态/优化交换；若有 PDB，再执行孔内刚体分子放置和 Packmol 交接。</li>
+<li><code>fill-pore</code>：当前只检查既有孔填充产物并写状态，不会重新执行通用填充算法。</li>
+<li><code>audit</code>：汇总既有运行的可行性状态；不会重新从头测量所有几何。</li>
+<li><code>audit-packmol-output</code>：检查后续 Packmol 结果中非孔相原子/分子质心是否深入原孔域。</li>
+<li><code>porous-film-validate</code>：对 <code>qa_export</code> 执行独立验证。</li>
+</ul>
+<h2 seq="auto">完成判定</h2>
+<ol>
+<li>先看命令退出状态，再看 <code>outputs/calculation_status.json</code>。</li>
+<li>区分 <code>completed_feasible</code>、<code>completed_infeasible</code> 和 <code>failed</code>。</li>
+<li>读取 <code>outputs/feasibility.json</code> 与 <code>realized_geometry_parameters.json</code>。</li>
+<li>确认 <code>qa_export/checksums.sha256</code> 完整。</li>
+<li>单独执行 validator，并以其 PASS/FAIL/NOT_EVALUABLE 为独立证据。</li>
+<li>GLB 能打开只证明网格可查看，不证明分布与硬约束合格。</li>
+</ol>
+
+<h1 seq="auto">输出文件与下游用途</h1>
+<table><colgroup><col width="285"/><col width="510"/></colgroup><thead><tr><th background-color="light-gray"><p>文件</p></th><th background-color="light-gray"><p>用途</p></th></tr></thead><tbody>
+<tr><td><p><code>qa_export/final_phase.h5</code></p></td><td><p>权威最终二值孔相；数据顺序 z,y,x，0=半导体，1=孔，x/y周期、z有限。</p></td></tr>
+<tr><td><p><code>qa_export/final_centerlines.h5</code></p></td><td><p>从最终相位提取的中心线、周期展开坐标、壁面距离、贯通和分支标记。</p></td></tr>
+<tr><td><p><code>qa_export/final_cross_sections.csv</code></p></td><td><p>每个法向截面的中心、切向、面积、等效直径、曲率波动、有效性和剔除原因。</p></td></tr>
+<tr><td><p><code>qa_export/final_measurements.json</code></p></td><td><p>最终相位测量总表。</p></td></tr>
+<tr><td><p><code>qa_export/unit_geometry.jsonl</code></p></td><td><p>生成单元 schema v1/v2 溯源；不是正式最终参数证据。</p></td></tr>
+<tr><td><p><code>qa_export/channel_curves.h5</code></p></td><td><p>生成通道中心线和半径曲线，用于重放与单元级验证。</p></td></tr>
+<tr><td><p><code>qa_export/main_unit_metrics.csv</code></p></td><td><p>叶瓣数、填充率、半径 CV、弯折、自交净距等生成复杂度诊断。</p></td></tr>
+<tr><td><p><code>outputs/semiconductor_solid_target.glb</code></p></td><td><p>Blender 可打开的目标盒半导体实体，孔表现为空腔。</p></td></tr>
+<tr><td><p><code>qa_export/final_surface.ply</code></p></td><td><p>中立表面网格。</p></td></tr>
+<tr><td><p><code>outputs/pore_geometry.h5</code></p></td><td><p>组合几何与生成溯源容器。</p></td></tr>
+<tr><td><p><code>requested_design_parameters.json</code></p></td><td><p>外部优化器提出的设计点。</p></td></tr>
+<tr><td><p><code>realized_geometry_parameters.json</code></p></td><td><p>最终实测值、审核结果和形状复杂度摘要。</p></td></tr>
+<tr><td><p><code>feasibility.json</code></p></td><td><p>可行性与约束状态。</p></td></tr>
+<tr><td><p><code>calculation_status.json</code></p></td><td><p>运行终态、警告和失败原因。</p></td></tr>
+<tr><td><p><code>objectives.json</code></p></td><td><p>当前只把孔隙率绝对误差作为占位目标；真实迁移率/热导率需下游写入。</p></td></tr>
+<tr><td><p><code>uncertainty.json</code></p></td><td><p>seed panel 的可行率、均值和方差。</p></td></tr>
+<tr><td><p><code>pore_reference_coordinates.cif</code> 等</p></td><td><p>仅在启用旧 PDB 分子放置流程时生成，用于 Packmol/后续压缩。</p></td></tr>
+</tbody></table>
+
+<h1 seq="auto">源码结构与审查入口</h1>
+<table><colgroup><col width="320"/><col width="475"/></colgroup><thead><tr><th background-color="light-gray"><p>文件/目录</p></th><th background-color="light-gray"><p>职责与重点入口</p></th></tr></thead><tbody>
+<tr><td><p><code>src/porous_film/config/models.py</code></p></td><td><p>严格配置模型、schema v2→v3 兼容翻译、默认值、范围检查和 seed 数计算。</p></td></tr>
+<tr><td><p><code>distributions/core.py</code></p></td><td><p>解析分布、混合分量整数分配、分层抽样、CDF。</p></td></tr>
+<tr><td><p><code>centers/generation.py</code></p></td><td><p>点阵扰动、RDF 目标函数、随机中心和退火式中心优化。</p></td></tr>
+<tr><td><p><code>geometry/complex_shapes.py</code></p></td><td><p>多叶紧凑孔、变半径多弯通道、体积估算和自交检查。</p></td></tr>
+<tr><td><p><code>geometry/sdf.py</code></p></td><td><p>CompactUnit/ChannelUnit、SDF、roughness、周期像、构建单元和缓存。</p></td></tr>
+<tr><td><p><code>geometry/scaling.py</code></p></td><td><p>统一缩放所有复杂几何字段。</p></td></tr>
+<tr><td><p><code>voxel/grid.py</code></p></td><td><p>分块体素化、PhaseGrid HDF5、二分尺度求孔隙率。</p></td></tr>
+<tr><td><p><code>metrics/final_geometry.py</code></p></td><td><p>最终相位中心、轨迹、法向截面、直径、曲率、方向和通道指标。</p></td></tr>
+<tr><td><p><code>metrics/audit.py</code></p></td><td><p>输入—实测比较、统计阈值、连通/截面/局部厚度审核。</p></td></tr>
+<tr><td><p><code>parallel/*.py</code></p></td><td><p>资源发现、spawn 进程池、候选/seed 任务、确定性重放、失败记录。</p></td></tr>
+<tr><td><p><code>molecules/*.py</code></p></td><td><p>可选刚体 PDB 模板读取、孔内放置和碰撞检查。</p></td></tr>
+<tr><td><p><code>io/exporters.py</code></p></td><td><p>GLB/PLY、QA 契约、网格回体素化和校验和。</p></td></tr>
+<tr><td><p><code>pipeline.py</code></p></td><td><p>端到端编排、文件写出、状态和优化交换，是最大集成入口。</p></td></tr>
+<tr><td><p><code>src/porous_film_validator/validate.py</code></p></td><td><p>不导入主包的独立验证器；约 4400 行，应重点检查重复实现的一致性。</p></td></tr>
+<tr><td><p><code>tests/</code></p></td><td><p>配置、分布、形状、体素、测量、并行、导出、验证器和端到端测试。</p></td></tr>
+</tbody></table>
+
+<h1 seq="auto">当前已确认的缺口与代码审查优先级</h1>
+<callout emoji="⚠️" background-color="light-red" border-color="red"><p>下面是截至 2026年8月31日从标签 2.0 源码直接核对出的实际缺口。外部团队应把它们当作审查入口，而不是把文档中的理想设计误认为已全部实现。</p></callout>
+<h2 seq="auto">优先级 P0：参数语义与通过判定</h2>
+<ol>
+<li><b>紧凑孔 eta 未完成最终相审核。</b><code>compact_aspect_ratio</code> 可输入并用于生成多叶孔，但 schema v3 路径没有从最终连通孔相分类和测量紧凑孔 eta；<code>compact_eta_result</code> 为 null。</li>
+<li><b>双平面取向只比较两个边缘分布。</b>生成时 xz/xy 角按同一混合分量配对，但审核分别比较 <code>theta_xz</code> 与 <code>theta_xy</code>，没有验证联合配对或相关性。</li>
+<li><b>没有独立的“必须存在 z 贯通孔”配置门。</b>程序能识别 through 轨迹并只用它们做正式测量；没有 through 轨迹时通常因无样本失败，但没有单独、清晰、可配置的拓扑硬约束字段。</li>
+<li><b>schema v3 未把最大重叠比例加入通过门。</b>重叠比例会计算和输出，但 <code>_audit_final_geometry_targets()</code> 当前只对 x 贯通和最小截面执行矩阵约束；<code>maximum_overlap_fraction</code> 在旧审核路径才直接判定。</li>
+<li><b>绝对等效直径只直接控制通道生成。</b>紧凑孔仍主要由内部体积和 eta 决定，正式直径目标没有对紧凑孔单元建立直接反演映射。</li>
+<li><b>曲率目标到 roughness 的映射只是经验比例。</b>当前函数是 <code>min(0.25, 0.05*w_target)</code>，不能保证最终曲率分布接近输入。</li>
+</ol>
+<h2 seq="auto">优先级 P1：搜索与可行率</h2>
+<ol>
+<li>内部只对孔隙率做一维全局尺度二分；中心、通道数量、连接、直径、方向、曲折度和曲率没有联合内层优化。</li>
+<li>最终孔合并后，各正式分布会同时变化；当前候选搜索主要靠随机 seed，难以在大盒子里同时满足全部严格目标。</li>
+<li>没有合格候选时，回退候选只按孔隙率误差排序，而不是按全部正式分布与硬约束的综合距离排序。</li>
+<li>最终审核只统计 through 轨迹。通孔数量少时，直径、方向、eta/tau 和曲率样本可能为 0 或极少，统计检验不稳定。</li>
+</ol>
+<h2 seq="auto">优先级 P2：接口、报告与维护</h2>
+<ol>
+<li>Pydantic 生成的 JSON Schema 仍会把内部兼容字段 <code>pores</code>、<code>center_distribution</code>、<code>compact</code> 标成 required，虽然运行时的 before-validator 会由 schema v3 输入自动补出这些字段；机器接口说明与真实解析行为不完全一致。</li>
+<li><code>output.root</code> 和 <code>output.write_plots</code> 当前没有实际生产逻辑；代码本身不生成输入—输出分布曲线。</li>
+<li><code>generate-geometry</code> 与 <code>generate</code> 的状态/优化交换输出不完全相同；外部调用方不能假定两条命令写出同样文件。</li>
+<li>几何主测量器与独立 validator 有大量重复算法，容易出现双边同时复制同一假设或修复不同步。</li>
+<li>官方版本号 2.0、输入 schema 3、包版本 0.4.0.dev1 三套数字并存，外部接口必须记录三者，不能只看 <code>porous-film version</code>。</li>
+<li>仓库标签 2.0 没有 LICENSE 文件。向第三方转交、再发布或商业使用前，应由项目所有者补充授权范围。</li>
+</ol>
+<h2 seq="auto">优先级 P3：功能边界</h2>
+<ul>
+<li>不支持 Y 型/树枝型生成通道、闭环孔道和孔内拓扑洞。</li>
+<li>不支持任意表格 PDF/CDF，只支持解析分布及其线性混合。</li>
+<li>不直接表达直径、方向、曲率等属性之间的联合协方差。</li>
+<li>GLB 的 Shade Smooth 只改变显示；任何网格几何平滑都必须重新做全部几何审核。</li>
+</ul>
+
+<h1 seq="auto">当前验证证据</h1>
+<p>本次交接在一个由标签 2.0 导出的干净源码快照上重新执行：</p>
+<ul>
+<li><code>uv sync --frozen --all-groups</code>：成功。</li>
+<li><code>uv run porous-film version</code>：输出 <code>porous-film 0.4.0.dev1</code>。</li>
+<li><code>uv run ruff check .</code>：通过。</li>
+<li><code>uv build</code>：wheel 和 sdist 均成功生成。</li>
+<li>完整测试：441 passed，6 failed，5 skipped，用时约 7分59秒。</li>
+</ul>
+<p>六个失败中，五个来自 Windows 嵌套 PowerShell 环境无法解析 <code>Get-FileHash</code> 的部署构建测试；一个来自进程池故障时“已完成结果集合”的竞态测试。该并行测试单独重跑三次，结果为两次通过、一次失败，说明它具有时序不稳定性。五个 skipped 均为需要显式设置 <code>POROUS_FILM_RUN_HEAVY=1</code> 的重型生成/并行测试。</p>
+<p>这份结果不应写成“全部测试通过”。外部团队应在 Python 3.12 的目标 Linux 环境重跑全套测试、重型测试和一个真实分辨率的端到端样本。</p>
+
+<h1 seq="auto">既有示例与性能证据</h1>
+<p>交接包附带 10 个 3 × 3 × 0.6 μm 的 schema v3 配置，覆盖分散虫状孔、圆钝杆状孔、细分散孔、多尺度孔、聚集多叶孔、不规则网络和双连续倾向等设计。还附带前三个样例的 GLB 和状态 JSON。</p>
+<table><colgroup><col width="205"/><col width="120"/><col width="125"/><col width="145"/><col width="195"/></colgroup><thead><tr><th background-color="light-gray"><p>样例</p></th><th background-color="light-gray"><p>孔隙率</p></th><th background-color="light-gray"><p>总耗时</p></th><th background-color="light-gray"><p>峰值内存</p></th><th background-color="light-gray"><p>审核结果</p></th></tr></thead><tbody>
+<tr><td><p>A01 dispersed-worms</p></td><td><p>0.2793</p></td><td><p>1895 s</p></td><td><p>3436 MiB</p></td><td><p>FAIL；无 through 轨迹样本。</p></td></tr>
+<tr><td><p>A02 rounded-rods</p></td><td><p>0.3005</p></td><td><p>2216 s</p></td><td><p>3613 MiB</p></td><td><p>FAIL；分布和粗细网格稳定性未通过。</p></td></tr>
+<tr><td><p>A03 fine-dispersed</p></td><td><p>0.2903</p></td><td><p>1321 s</p></td><td><p>3920 MiB</p></td><td><p>FAIL；无 through 轨迹样本。</p></td></tr>
+</tbody></table>
+<p>这些样例证明程序能构造和导出复杂孔形状，但也直接证明当前“生成机制到最终正式分布”的映射需要继续优化。</p>
+
+<h1 seq="auto">二次开发建议与不可破坏的约束</h1>
+<ol>
+<li><b>先固定基线。</b>从标签 <code>2.0</code> 新建开发分支，记录提交、输入 hash、Python/依赖版本和测试结果。</li>
+<li><b>先补语义缺口，再提速。</b>第一批建议依次处理：z 贯通硬门；最终紧凑孔分类/eta；联合取向审核；schema v3 重叠门；曲率—roughness 标定；多目标候选排序。</li>
+<li><b>每个正式输入必须有同义最终测量。</b>对象、单位、边界、权重、分段和剔除规则必须一致；若做不到，应把它降为内部控制量。</li>
+<li><b>保持测量隔离。</b>最终测量器不得读取目标值和生成单元记录；validator 不得导入主包或信任主程序预写指标。</li>
+<li><b>先写失败测试。</b>至少覆盖配置、生成映射、最终测量、主审核、独立 validator、串并行一致性、输出 schema 和端到端样本。</li>
+<li><b>性能优化不能改变科学几何。</b>对 SDF 裁剪、向量化、并行、缓存或 GPU 改写，必须与暴力参考逐点比较，并验证串行/并行输出哈希或数值等价。</li>
+<li><b>不要只优化孔隙率。</b>建议把内部候选搜索改为同时考虑 g_xy、直径、方向、eta、tau、曲率、贯通和半导体约束的多目标/约束优化。</li>
+<li><b>区分预览与生产。</b>粗网格只用于形状筛选；生产结果必须做网格收敛、独立验证和足够的随机种子重复。</li>
+<li><b>保留兼容层但停止扩大旧接口。</b>旧 schema v2、PDB 和 padding 可继续读取；新功能应优先围绕 schema v3 的最终相参数契约。</li>
+</ol>
+
+<h1 seq="auto">推荐代码审查清单</h1>
+<ul>
+<li>输入：未知字段、分布族参数、支持区间、混合权重、单位与 schema 转换是否严格。</li>
+<li>随机性：所有随机来源是否由任务 seed/候选 identity/shape_seed 可追踪地派生。</li>
+<li>形状：多叶孔体积、包络、连通；通道 eta/tau、半径 profile、端帽和自交。</li>
+<li>边界：x/y 周期像是否无重复/缺失，z 是否保持有限且不被错误回卷。</li>
+<li>缩放：所有长度字段是否同步缩放，体积是否按三次方变化，方向和 eta/tau 是否不变。</li>
+<li>体素：轴顺序是否始终为 z,y,x；间距是否严格整除盒长；孔/半导体编码是否一致。</li>
+<li>测量：中心提取、轨迹连接、分支与表面排除、截面闭合、曲率平滑是否对分辨率稳定。</li>
+<li>审核：所有通过门是否只使用最终测量；缺样本是否明确失败；不合格候选是否不会被标成合格。</li>
+<li>独立验证：是否真正不依赖主实现，是否会检测被篡改的 HDF5/CSV/JSON/GLB 和校验和。</li>
+<li>并行：spawn、取消、worker 失败、结果排序、重放和父进程单写是否无竞态。</li>
+<li>输出：完整运行与几何运行的文件契约是否一致、版本是否清楚、报告是否会误写状态。</li>
+<li>安全与发布：不得打包账号、密码、私钥、固定服务器入口；补充明确 LICENSE 后再决定外部分发范围。</li>
+</ul>
+
+<h1 seq="auto">交接包内容与使用顺序</h1>
+<p>桌面压缩包按下列顺序阅读：</p>
+<ol>
+<li><code>00-START-HERE.md</code>：版本、验证结果、材料目录和安全说明。</li>
+<li><code>docs/v2孔生成器说明.md</code> 与 PDF：本飞书文档的离线副本。</li>
+<li><code>source/porous-film-generator-2.0/</code>：去除环境专用远程部署资料后的审查源码。</li>
+<li><code>dist/</code>：本次从标签 2.0 构建的 wheel 和 sdist。</li>
+<li><code>examples/configs/</code>：10 个实际 schema v3 配置。</li>
+<li><code>examples/visual-only-failed-audit/</code>：3 个 Blender GLB 和对应状态；仅看形状。</li>
+<li><code>examples/synthetic-validator-pass/</code>：测试生成的最小 QA 数据包，用于理解文件契约，不代表真实材料结构。</li>
+<li><code>review/</code>：JSON Schema、CLI help、1.0→2.0 核心差异、提交记录、测试日志、已知问题和文件清单。</li>
+<li><code>SHA256SUMS.txt</code>：包内文件校验。</li>
+</ol>
+<p>为避免泄露内部环境信息，外部包不包含凭据、私钥、明文密码、真实远程提交 JSON，也不包含带固定服务器入口/本机密钥路径的环境专用部署模板和历史部署计划。核心生成、审核、验证、测试和通用使用文档均保留；删减内容记录在 <code>SECURITY-REDACTIONS.md</code>。</p>
+
+<h1 seq="auto">维护结论</h1>
+<p>v2最值得保留的资产不是某一张 GLB，而是三条工程原则：复杂孔单元可复现生成；正式参数必须从最终孔相同义测量；主程序与独立 validator 分开核验。外部优化应先补齐参数语义和通过门，再改候选搜索与性能。任何速度提升如果改变最终相位、测量定义或随机身份，都必须视为科学行为变更，而不是普通重构。</p>

@@ -1,0 +1,4 @@
+"task_name","random_seed","expected_unit_count","porosity","through_centerline_count","wall_time_seconds","peak_rss_mib","pipeline_status","validator_status"
+"v2-A01-dispersed-worms","21001","43","0.27930555555555553","0","1895.4416196050588","3435.83203125","completed_infeasible","FAIL"
+"v2-A02-rounded-rods","21002","40","0.30050925925925925","2","2216.0273101490457","3612.69140625","completed_infeasible","FAIL"
+"v2-A03-fine-dispersed","21003","49","0.29032407407407407","0","1320.6839796078857","3919.6484375","completed_infeasible","FAIL"

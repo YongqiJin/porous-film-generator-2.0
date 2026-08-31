@@ -1,0 +1,237 @@
+# Independent validation report
+
+Status: PASS
+
+## Errors
+- None
+
+## Warnings
+- None
+
+## Independent metrics
+
+```json
+{
+  "checksums": {
+    "duplicates": [],
+    "mismatches": [],
+    "missing_required": [],
+    "unsafe_paths": [],
+    "verified_count": 13
+  },
+  "final_geometry": {
+    "centerline_point_count": 10,
+    "centerline_point_inside_fraction": 1.0,
+    "centerline_points_inside_phase": 10,
+    "invalid_cross_section_count": 0,
+    "rebuilt_branch_event_count": 0,
+    "rebuilt_center_distance_xy": {
+      "bin_centers_A": [
+        0.5,
+        1.5,
+        2.5,
+        3.5,
+        4.5,
+        5.5,
+        6.5,
+        7.5
+      ],
+      "g_xy": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "observed_pair_counts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "pair_count": 0,
+      "reference_pair_counts": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "valid_slice_count": 0
+    },
+    "rebuilt_centerline_count": 1,
+    "rebuilt_formal_samples": {
+      "channel_eta": [
+        2.3145717118463702
+      ],
+      "channel_tau": [
+        1.0
+      ],
+      "curvature_fluctuation": [
+        1.0222725014971201,
+        1.0222725014971201,
+        1.0222725014971201,
+        1.0222725014971201,
+        1.0222725014971201,
+        1.0222725014971201,
+        1.0222725014971201,
+        1.0222725014971201
+      ],
+      "equivalent_diameter_A": [
+        3.888408362521876,
+        3.888408362521876,
+        3.888408362521876,
+        3.888408362521876,
+        3.888408362521876,
+        3.888408362521876,
+        3.888408362521876,
+        3.888408362521876
+      ],
+      "theta_xy_deg": [],
+      "theta_xz_deg": [
+        90.0
+      ]
+    },
+    "rebuilt_g_xy_pair_count": 0,
+    "rebuilt_invalid_cross_section_count": 0,
+    "rebuilt_projected_orientation_count": 1,
+    "rebuilt_slice_center_count": 10,
+    "rebuilt_slice_count": 10,
+    "rebuilt_through_centerline_count": 1,
+    "rebuilt_valid_channel_geometry_count": 1,
+    "rebuilt_valid_cross_section_count": 8,
+    "reported_centerline_count": 1,
+    "through_network_count": 1,
+    "valid_cross_section_count": 8
+  },
+  "glb": {
+    "available": true,
+    "bounds_A": [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        10.0,
+        10.0,
+        10.0
+      ]
+    ],
+    "bounds_match": true,
+    "expected_solid_volume_A3": 880.0,
+    "geometry_count": 1,
+    "metadata_target_box_match": true,
+    "occupancy_match_fraction": 1.0,
+    "occupancy_mismatch_fraction": 0.0,
+    "occupancy_sample_count": 1000,
+    "solid_mesh_volume_A3": 868.0,
+    "solid_volume_relative_error": 0.013636363636363636
+  },
+  "molecules": {},
+  "phase": {
+    "connected_pore_components": 1,
+    "minimum_semiconductor_cross_section_fraction": 0.6,
+    "origin_A": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "phase_dimensions_zyx": [
+      10,
+      10,
+      10
+    ],
+    "pore_voxels": 120,
+    "porosity": 0.12,
+    "semiconductor_voxels": 880,
+    "semiconductor_x_percolates": true,
+    "spacing_A": 1.0,
+    "target_box_A": [
+      10.0,
+      10.0,
+      10.0
+    ]
+  },
+  "units": {
+    "channel_count": 0,
+    "channel_fraction": 0.0,
+    "compact_count": 0,
+    "rdf_distance_mean_A": null,
+    "rdf_pair_count": 0,
+    "total_count": 0,
+    "volume_mean_A3": null,
+    "volume_sample_count": 0,
+    "volume_std_A3": null
+  }
+}
+```
+
+## Report consistency
+
+```json
+{
+  "checked": true,
+  "density_delta_g_cm3": 0.0,
+  "main_metrics_match": true,
+  "minimum_distance_delta_A": 0.0,
+  "packing_count_match": true,
+  "porosity_delta": 0.0
+}
+```
+
+## Target compliance
+
+```json
+{
+  "channel_eta_ks": 0.0,
+  "channel_eta_normalized_wasserstein": 0.0,
+  "channel_eta_sample_count": 1,
+  "channel_eta_within_tolerance": true,
+  "channel_tau_ks": 0.0,
+  "channel_tau_normalized_wasserstein": 0.0,
+  "channel_tau_sample_count": 1,
+  "channel_tau_within_tolerance": true,
+  "curvature_fluctuation_ks": 0.0,
+  "curvature_fluctuation_normalized_wasserstein": 0.0,
+  "curvature_fluctuation_sample_count": 8,
+  "curvature_fluctuation_within_tolerance": true,
+  "density_relative_error": null,
+  "density_relative_tolerance": 0.02,
+  "density_within_tolerance": true,
+  "equivalent_diameter_A_ks": 0.0,
+  "equivalent_diameter_A_normalized_wasserstein": 0.0,
+  "equivalent_diameter_A_sample_count": 8,
+  "equivalent_diameter_A_within_tolerance": true,
+  "g_xy_pair_count": 0,
+  "g_xy_weighted_loss": 0.0,
+  "g_xy_within_tolerance": true,
+  "molecule_count_match": true,
+  "porosity_absolute_error": 0.0,
+  "porosity_tolerance": 0.01,
+  "porosity_within_tolerance": true,
+  "realized_density_g_cm3": null,
+  "realized_porosity": 0.12,
+  "target_box_match": true,
+  "target_density_g_cm3": null,
+  "target_porosity": 0.12,
+  "theta_xy_deg_ks": 0.0,
+  "theta_xy_deg_normalized_wasserstein": 0.0,
+  "theta_xy_deg_sample_count": 0,
+  "theta_xy_deg_within_tolerance": true,
+  "theta_xz_deg_ks": 0.0,
+  "theta_xz_deg_normalized_wasserstein": 0.0,
+  "theta_xz_deg_sample_count": 1,
+  "theta_xz_deg_within_tolerance": true
+}
+```

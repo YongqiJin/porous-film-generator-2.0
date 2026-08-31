@@ -1,0 +1,5 @@
+HETATM   11 CL1  MOL B   7      -1.000   0.000   0.000  1.00  0.00          CL
+HETATM   12 CL2  MOL B   7       1.000   0.000   0.000  1.00  0.00          CL
+CONECT   11   12
+CONECT   12   11
+END

@@ -1,0 +1,19 @@
+{
+  "actual_density_g_cm3": null,
+  "audit_passed": false,
+  "formal_measurements_available": true,
+  "minimum_interatomic_distance_A": null,
+  "packing_count": null,
+  "porosity_absolute_error": 0.0,
+  "realized_porosity": 0.12,
+  "target_porosity": 0.12,
+  "warnings": [
+    "equivalent_diameter distribution comparison exceeds audit limits",
+    "theta_xz distribution comparison exceeds audit limits",
+    "theta_xy final-geometry measurement has no valid samples",
+    "channel_eta distribution comparison exceeds audit limits",
+    "channel_tau distribution comparison exceeds audit limits",
+    "curvature_fluctuation distribution comparison exceeds audit limits",
+    "center_distance_xy comparison exceeds audit limit"
+  ]
+}

@@ -1,0 +1,12 @@
+c0dd6d80522a26dba1139226aaba10f05b45889b`t2026-08-20T15:38:41+08:00`tfeat: add complex pore shape generation v1
+ed97a1c068e32f199004064c8dd6f6301f249957`t2026-08-24T23:52:50+08:00`tfeat: add final pore parameter contract
+d21407b2450b31d2c71220797cf791ecd4ed351f`t2026-08-24T23:57:07+08:00`tfeat: sample paired orientations and pore diameters
+5e69c20c57d51f83decb3b94b8116d57402b65e3`t2026-08-25T00:08:25+08:00`tfeat: measure through-pore geometry from final phase
+2ff7ee267c411564f06eb9e8d942b04d440d5773`t2026-08-25T00:26:15+08:00`tfeat: audit formal targets from final phase
+5c6894d91fc8642ba8b1bcf789ea759658f281a6`t2026-08-25T00:43:42+08:00`tfeat: export and validate final phase measurements
+ed9311fef52020f1b31bef496447480bcfbf3611`t2026-08-25T00:59:52+08:00`tfeat: align generation inputs with final pore targets
+54a52f6184550e76f1770f2a69ce63714964a4a0`t2026-08-25T01:04:21+08:00`tfeat: align center generation and geometry-only workflow
+711cb5a9351eb74b8b8ff2e225eeed5cb69481d9`t2026-08-25T01:38:48+08:00`tfix: preserve legacy seed density overrides
+926b7a5bb43fc6de0abda5ac1774dbcd387638fe`t2026-08-25T02:39:26+08:00`tfix: support geometry-only optimizer payloads
+f4e9cf956d75c2de63cd77fc5ce83fe32478acf5`t2026-08-25T02:39:42+08:00`tfix: measure only valid through-pore geometry
+1c9a10793e96437202482ec44e4263b87ef64882`t2026-08-25T02:39:51+08:00`tfeat: independently rebuild final pore measurements

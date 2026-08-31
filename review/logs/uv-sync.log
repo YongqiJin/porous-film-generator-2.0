@@ -1,0 +1,42 @@
+Using CPython 3.14.6
+Creating virtual environment at: .venv
+   Building porous-film-generator @ file:///C:/Calculation_results/2026-08-31/python_results/porous-film-generator-v2-external-handoff/work/source/porous-film-generator-2.0
+      Built porous-film-generator @ file:///C:/Calculation_results/2026-08-31/python_results/porous-film-generator-v2-external-handoff/work/source/porous-film-generator-2.0
+Prepared 1 package in 1.90s
+Installed 36 packages in 4.35s
+ + annotated-doc==0.0.5
+ + annotated-types==0.8.0
+ + colorama==0.4.6
+ + coverage==7.15.4
+ + gemmi==0.7.5
+ + h5py==3.16.0
+ + imageio==2.37.4
+ + iniconfig==2.3.0
+ + lazy-loader==0.5
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + networkx==3.6.1
+ + numpy==2.5.2
+ + packaging==26.3
+ + pillow==12.3.0
+ + pluggy==1.6.0
+ + porous-film-generator==0.4.0.dev1 (from file:///C:/Calculation_results/2026-08-31/python_results/porous-film-generator-v2-external-handoff/work/source/porous-film-generator-2.0)
+ + psutil==7.2.2
+ + pydantic==2.13.4
+ + pydantic-core==2.46.4
+ + pygments==2.20.0
+ + pytest==9.1.1
+ + pytest-cov==7.1.0
+ + pyyaml==6.0.3
+ + rich==15.0.0
+ + ruff==0.16.2
+ + scikit-image==0.26.0
+ + scipy==1.18.0
+ + shellingham==1.5.4
+ + threadpoolctl==3.6.0
+ + tifffile==2026.7.31
+ + trimesh==5.0.0
+ + typer==0.27.1
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tzdata==2026.3

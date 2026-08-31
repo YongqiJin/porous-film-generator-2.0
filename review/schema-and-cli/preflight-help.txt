@@ -1,0 +1,11 @@
+                                                                               
+ Usage: porous-film preflight [OPTIONS]                                        
+                                                                               
++- Options -------------------------------------------------------------------+
+| *  --config             <file>  [required]                                  |
+|    --result-root        <path>  Root for dated calculation output           |
+|                                 directories.                                |
+|                                 [default: C:\Calculation_results]           |
+|    --help                       Show this message and exit.                 |
++-----------------------------------------------------------------------------+
+

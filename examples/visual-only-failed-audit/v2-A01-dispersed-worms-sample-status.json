@@ -1,0 +1,79 @@
+{
+  "audit_passed": false,
+  "candidate_records": [
+    {
+      "audit_passed": false,
+      "failure_message": null,
+      "failure_type": null,
+      "identity": {
+        "candidate_index": 0,
+        "derived_random_seed": 277068599,
+        "round_index": 0,
+        "seed": 21001,
+        "sequence_index": 0
+      },
+      "porosity": 0.27930555555555553,
+      "scale": 1.0087890625,
+      "succeeded": true,
+      "wall_time_seconds": 937.7373341158964,
+      "warnings": [
+        "equivalent_diameter final-geometry measurement has no valid samples",
+        "theta_xz final-geometry measurement has no valid samples",
+        "theta_xy final-geometry measurement has no valid samples",
+        "channel_eta final-geometry measurement has no valid samples",
+        "channel_tau final-geometry measurement has no valid samples",
+        "curvature_fluctuation final-geometry measurement has no valid samples",
+        "center_distance_xy comparison exceeds audit limit"
+      ]
+    }
+  ],
+  "candidate_wall_time_sum_seconds": 937.7373341158964,
+  "config": "../configs/v2-A01-dispersed-worms.yaml",
+  "config_sha256": "4a3698ffa746566d993559b7a135b5090bae828ea6687e2f78985404eb7cb6ff",
+  "cpu_time_seconds": 1878.652318255,
+  "ended_at": "2026-08-28T20:31:37.411326+08:00",
+  "expected_unit_count": 43,
+  "g_xy_pair_count": 0,
+  "hashed_file_count": 66,
+  "historical_package_version": "0.4.0.dev1",
+  "hostname": "<REDACTED>",
+  "official_generator_version": "2.0",
+  "output": "<REMOTE_OUTPUT_REDACTED>",
+  "peak_rss_mib": 3435.83203125,
+  "pid": 2529370,
+  "pipeline_status": "completed_infeasible",
+  "porosity": 0.27930555555555553,
+  "preflight": {
+    "errors": [],
+    "estimated_memory_bytes": 1771200,
+    "estimated_voxels": 43200,
+    "passed": true,
+    "warnings": []
+  },
+  "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "random_seed": 21001,
+  "schema_version": 1,
+  "selected_candidate": {
+    "candidate_index": 0,
+    "derived_random_seed": 277068599,
+    "round_index": 0,
+    "seed": 21001,
+    "sequence_index": 0
+  },
+  "stage_seconds": {
+    "config_load": 0.006221225019544363,
+    "generation_total": 1878.6738483691588,
+    "hashing": 0.014330647885799408,
+    "independent_validation": 16.732936871936545,
+    "preflight": 0.010460559045895934
+  },
+  "started_at": "2026-08-28T20:00:01.984768+08:00",
+  "status": "completed_validation_failed",
+  "task_name": "v2-A01-dispersed-worms",
+  "through_centerline_count": 0,
+  "validator_exit_code": 1,
+  "validator_status": "FAIL",
+  "validator_stderr": "ERROR: schema-v3 target equivalent_diameter_A does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target theta_xz_deg does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target theta_xy_deg does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target channel_eta does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target channel_tau does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target curvature_fluctuation does not match independent final_phase measurements: sample_count=0, ks=inf, normalized_wasserstein=inf\nERROR: schema-v3 target g_xy does not match independent final_phase measurements: weighted_loss=inf, pair_count=0",
+  "validator_stdout": "FAIL",
+  "wall_time_seconds": 1895.4416196050588
+}

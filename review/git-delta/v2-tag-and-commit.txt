@@ -1,0 +1,13 @@
+tag 2.0
+Tagger:     Codex <codex@local>
+TaggerDate: Fri Aug 28 19:44:19 2026 +0800
+
+Porous Film Generator 2.0 - complex shapes and strengthened final-geometry audit
+
+commit 1c9a10793e96437202482ec44e4263b87ef64882
+Author:     Codex <codex@local>
+AuthorDate: Tue Aug 25 02:39:51 2026 +0800
+Commit:     Codex <codex@local>
+CommitDate: Tue Aug 25 02:39:51 2026 +0800
+
+    feat: independently rebuild final pore measurements

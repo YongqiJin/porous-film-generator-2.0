@@ -1,0 +1,178 @@
+..........................................................F.FFF....F.... [ 15%]
+........................................................................ [ 31%]
+...............s........................................................ [ 47%]
+........................................................................ [ 63%]
+..............................................ssss............F......... [ 79%]
+........................................................................ [ 95%]
+....................                                                     [100%]
+================================== FAILURES ===================================
+__ test_release_builder_uv_cache_accepts_verified_pair_and_copies_atomically __
+
+tmp_path = WindowsPath('C:/Calculation_results/2026-08-31/python_results/porous-film-generator-v2-external-handoff/work/pytest-temp/test_release_builder_uv_cache_0')
+
+    @requires_powershell
+    def test_release_builder_uv_cache_accepts_verified_pair_and_copies_atomically(
+        tmp_path: Path,
+    ) -> None:
+        archive, sidecar = _tiny_uv_cache_pair(tmp_path)
+        bootstrap_dir = tmp_path / "bootstrap"
+        source_archive_bytes = archive.read_bytes()
+        source_sidecar_text = sidecar.read_text(encoding="utf-8")
+    
+        result = _publish_uv_cache_json(archive, sidecar, bootstrap_dir, block_network=True)
+    
+>       assert result.returncode == 0, result.stderr
+E       AssertionError: Get-Sha256Lower : The term 'Get-FileHash' is not recognized as the name of a cmdlet, function, script file, or operable
+E          program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+E         At C:\Calculation_results\2026-08-31\python_results\porous-film-generator-v2-external-handoff\work\source\porous-film-g
+E         enerator-2.0\deployment\build_release.ps1:367 char:19
+E         +   $actualDigest = Get-Sha256Lower -Path $Path
+E         +                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+E             + CategoryInfo          : ObjectNotFound: (Get-FileHash:String) [Get-Sha256Lower], CommandNotFoundException
+E             + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower
+E          
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '\n      $ErrorActionPref...t-Sha256Lower], CommandNotFoundException\n    + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower\n \n").returncode
+
+tests\test_deployment_assets.py:322: AssertionError
+_ test_release_builder_uv_cache_rejects_archive_bytes_that_do_not_match_pinned_digest _
+
+tmp_path = WindowsPath('C:/Calculation_results/2026-08-31/python_results/porous-film-generator-v2-external-handoff/work/pytest-temp/test_release_builder_uv_cache_2')
+
+    @requires_powershell
+    def test_release_builder_uv_cache_rejects_archive_bytes_that_do_not_match_pinned_digest(
+        tmp_path: Path,
+    ) -> None:
+        archive, sidecar = _tiny_uv_cache_pair(tmp_path)
+        archive.write_bytes(b"not the official uv archive")
+    
+        result = _publish_uv_cache_json(archive, sidecar, tmp_path / "bootstrap")
+    
+        assert result.returncode != 0
+>       assert "uv archive SHA-256 is not the pinned uv 0.12.1 digest" in result.stderr
+E       assert 'uv archive SHA-256 is not the pinned uv 0.12.1 digest' in "Get-Sha256Lower : The term 'Get-FileHash' is not recognized as the name of a cmdlet, function, script file, or operab...et-Sha256Lower], CommandNotFoundException\n    + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower\n \n"
+E        +  where "Get-Sha256Lower : The term 'Get-FileHash' is not recognized as the name of a cmdlet, function, script file, or operab...et-Sha256Lower], CommandNotFoundException\n    + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower\n \n" = CompletedProcess(args=['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '\n      $ErrorActionPref...t-Sha256Lower], CommandNotFoundException\n    + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower\n \n").stderr
+
+tests\test_deployment_assets.py:366: AssertionError
+____ test_release_builder_uv_cache_mode_does_not_invoke_github_or_download ____
+
+tmp_path = WindowsPath('C:/Calculation_results/2026-08-31/python_results/porous-film-generator-v2-external-handoff/work/pytest-temp/test_release_builder_uv_cache_3')
+
+    @requires_powershell
+    def test_release_builder_uv_cache_mode_does_not_invoke_github_or_download(
+        tmp_path: Path,
+    ) -> None:
+        archive, sidecar = _tiny_uv_cache_pair(tmp_path)
+    
+        result = _publish_uv_cache_json(
+            archive,
+            sidecar,
+            tmp_path / "bootstrap",
+            block_network=True,
+        )
+    
+>       assert result.returncode == 0, result.stderr
+E       AssertionError: Get-Sha256Lower : The term 'Get-FileHash' is not recognized as the name of a cmdlet, function, script file, or operable
+E          program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+E         At C:\Calculation_results\2026-08-31\python_results\porous-film-generator-v2-external-handoff\work\source\porous-film-g
+E         enerator-2.0\deployment\build_release.ps1:367 char:19
+E         +   $actualDigest = Get-Sha256Lower -Path $Path
+E         +                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+E             + CategoryInfo          : ObjectNotFound: (Get-FileHash:String) [Get-Sha256Lower], CommandNotFoundException
+E             + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower
+E          
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '\n      $ErrorActionPref...t-Sha256Lower], CommandNotFoundException\n    + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower\n \n").returncode
+
+tests\test_deployment_assets.py:386: AssertionError
+_ test_release_builder_uv_manifest_contract_uses_verified_digest_and_direct_urls _
+
+tmp_path = WindowsPath('C:/Calculation_results/2026-08-31/python_results/porous-film-generator-v2-external-handoff/work/pytest-temp/test_release_builder_uv_manife0')
+
+    @requires_powershell
+    def test_release_builder_uv_manifest_contract_uses_verified_digest_and_direct_urls(
+        tmp_path: Path,
+    ) -> None:
+        archive, sidecar = _tiny_uv_cache_pair(tmp_path)
+    
+        result = _publish_uv_cache_json(archive, sidecar, tmp_path / "bootstrap")
+    
+>       assert result.returncode == 0, result.stderr
+E       AssertionError: Get-Sha256Lower : The term 'Get-FileHash' is not recognized as the name of a cmdlet, function, script file, or operable
+E          program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+E         At C:\Calculation_results\2026-08-31\python_results\porous-film-generator-v2-external-handoff\work\source\porous-film-g
+E         enerator-2.0\deployment\build_release.ps1:367 char:19
+E         +   $actualDigest = Get-Sha256Lower -Path $Path
+E         +                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+E             + CategoryInfo          : ObjectNotFound: (Get-FileHash:String) [Get-Sha256Lower], CommandNotFoundException
+E             + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower
+E          
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '\n      $ErrorActionPref...t-Sha256Lower], CommandNotFoundException\n    + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower\n \n").returncode
+
+tests\test_deployment_assets.py:399: AssertionError
+_ test_release_builder_refuses_preexisting_uv_official_sidecar_without_mutating_it _
+
+tmp_path = WindowsPath('C:/Calculation_results/2026-08-31/python_results/porous-film-generator-v2-external-handoff/work/pytest-temp/test_release_builder_refuses_p0')
+
+    @requires_powershell
+    def test_release_builder_refuses_preexisting_uv_official_sidecar_without_mutating_it(
+        tmp_path: Path,
+    ) -> None:
+        result = _publish_uv_cache_preexisting_official_failure_json(tmp_path)
+    
+>       assert result.returncode == 0, result.stderr
+E       AssertionError: Get-Sha256Lower : The term 'Get-FileHash' is not recognized as the name of a cmdlet, function, script file, or operable
+E          program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+E         At line:27 char:73
+E         + ... th $officialSidecar) { Get-Sha256Lower -Path $officialSidecar } else  ...
+E         +                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+E             + CategoryInfo          : ObjectNotFound: (Get-FileHash:String) [Get-Sha256Lower], CommandNotFoundException
+E             + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower
+E          
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '\n      $ErrorActionPref...t-Sha256Lower], CommandNotFoundException\n    + FullyQualifiedErrorId : CommandNotFoundException,Get-Sha256Lower\n \n").returncode
+
+tests\test_deployment_assets.py:473: AssertionError
+___________ test_broken_pool_error_keeps_completed_results_ordered ____________
+
+    def test_broken_pool_error_keeps_completed_results_ordered() -> None:
+        callbacks: list[str] = []
+        with (
+            spawn_pool(worker_count=3, worker_threads=1) as executor,
+            pytest.raises(ParallelPoolError) as exc_info,
+        ):
+            assert executor is not None
+            run_spawn_tasks(
+                [ProbeTask(2), ProbeTask(0), ProbeTask(1)],
+                pool_error_probe,
+                worker_count=3,
+                worker_threads=1,
+                executor=executor,
+                result_callback=callbacks.append,
+            )
+    
+>       assert exc_info.value.completed_results == ("done-0", "done-2")
+E       AssertionError: assert ('done-0',) == ('done-0', 'done-2')
+E         
+E         Right contains one more item: 'done-2'
+E         Use -v to get more diff
+
+tests\test_parallel_runtime.py:190: AssertionError
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_end_to_end.py:14: end-to-end pore generation requires POROUS_FILM_RUN_HEAVY=1 on the CPU server
+SKIPPED [1] tests\test_parallel_integration.py:673: Task 8 metadata generation test requires POROUS_FILM_RUN_HEAVY=1
+SKIPPED [1] tests\test_parallel_integration.py:695: Task 8 seed failure-isolation test requires POROUS_FILM_RUN_HEAVY=1
+SKIPPED [1] tests\test_parallel_integration.py:724: Task 8 parent-only shared-write test requires POROUS_FILM_RUN_HEAVY=1
+SKIPPED [1] tests\test_parallel_integration.py:748: Task 7 heavy pore-generation equivalence test requires POROUS_FILM_RUN_HEAVY=1
+FAILED tests/test_deployment_assets.py::test_release_builder_uv_cache_accepts_verified_pair_and_copies_atomically
+FAILED tests/test_deployment_assets.py::test_release_builder_uv_cache_rejects_archive_bytes_that_do_not_match_pinned_digest
+FAILED tests/test_deployment_assets.py::test_release_builder_uv_cache_mode_does_not_invoke_github_or_download
+FAILED tests/test_deployment_assets.py::test_release_builder_uv_manifest_contract_uses_verified_digest_and_direct_urls
+FAILED tests/test_deployment_assets.py::test_release_builder_refuses_preexisting_uv_official_sidecar_without_mutating_it
+FAILED tests/test_parallel_runtime.py::test_broken_pool_error_keeps_completed_results_ordered
+6 failed, 441 passed, 5 skipped in 478.52s (0:07:58)

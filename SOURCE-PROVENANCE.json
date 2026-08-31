@@ -1,0 +1,19 @@
+{
+  "official_name": "Porous Film Generator 2.0 — Complex Shapes",
+  "official_version": "2.0",
+  "git_tag": "2.0",
+  "tag_object_sha": "7b81f3b2a7421c7d1e2f70b4f965cb5dedb3615d",
+  "maintenance_branch": "release/2.0",
+  "commit_sha": "1c9a10793e96437202482ec44e4263b87ef64882",
+  "tree_sha": "966a97eb087426885eb4eab825b021b31113b5c3",
+  "baseline_tag": "1.0",
+  "baseline_commit": "a3627aa4475d868138fe987ec4068e9c9e6f48b8",
+  "historical_package_version": "0.4.0.dev1",
+  "input_schema_version": 3,
+  "created_date": "2026-08-31",
+  "timezone": "Asia/Shanghai",
+  "source_repository": "C:\\Calculation_assist\\porous-film-generator",
+  "source_snapshot": "git archive of tag 2.0 with security-only exclusions listed in SECURITY-REDACTIONS.md",
+  "core_source_modified": false,
+  "license_file_present": false
+}

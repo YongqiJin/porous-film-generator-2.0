@@ -1,0 +1,1 @@
+unit_id,kind,shape_model,shape_seed,anchor_x_A,anchor_y_A,anchor_z_A,latent_target_volume_A3,roughness,eta,tau,lobe_count,envelope_fill_fraction,centroid_offset_A,lobes_connected,radius_cv,minimum_to_maximum_radius_ratio,bend_count,nonplanarity,minimum_self_clearance_A

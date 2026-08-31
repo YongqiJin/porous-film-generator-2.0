@@ -1,0 +1,1478 @@
+{
+  "$defs": {
+    "AuditSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "candidate_count_per_round": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Candidate Count Per Round",
+          "type": "integer"
+        },
+        "maximum_rounds": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Maximum Rounds",
+          "type": "integer"
+        },
+        "coarse_spacing_A": {
+          "default": 2.0,
+          "exclusiveMinimum": 0,
+          "title": "Coarse Spacing A",
+          "type": "number"
+        },
+        "fine_spacing_A": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "Fine Spacing A",
+          "type": "number"
+        },
+        "orientation_aspect_ratio_tolerance": {
+          "default": 1e-06,
+          "minimum": 0,
+          "title": "Orientation Aspect Ratio Tolerance",
+          "type": "number"
+        },
+        "interface_mixing_layer_fraction": {
+          "default": 0.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Interface Mixing Layer Fraction",
+          "type": "number"
+        },
+        "available_memory_cap_bytes": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Available Memory Cap Bytes"
+        }
+      },
+      "title": "AuditSpec",
+      "type": "object"
+    },
+    "Box3D": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "exclusiveMinimum": 0,
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "exclusiveMinimum": 0,
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "exclusiveMinimum": 0,
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "title": "Box3D",
+      "type": "object"
+    },
+    "CenterDistributionSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "lattice": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lattice"
+        },
+        "position_jitter": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Position Jitter",
+          "type": "number"
+        },
+        "rdf": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RDFComponent"
+          },
+          "title": "Rdf",
+          "type": "array"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "CenterDistributionSpec",
+      "type": "object"
+    },
+    "ChannelPoreSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "relative_volume": {
+          "$ref": "#/$defs/DistributionSpec"
+        },
+        "aspect_ratio": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistributionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "eta": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistributionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tortuosity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistributionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tau": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistributionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "roughness": {
+          "$ref": "#/$defs/DistributionSpec"
+        }
+      },
+      "title": "ChannelPoreSpec",
+      "type": "object"
+    },
+    "CompactPoreSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "relative_volume": {
+          "$ref": "#/$defs/DistributionSpec"
+        },
+        "aspect_ratio": {
+          "$ref": "#/$defs/DistributionSpec"
+        },
+        "roughness": {
+          "$ref": "#/$defs/DistributionSpec"
+        }
+      },
+      "required": [
+        "relative_volume",
+        "aspect_ratio",
+        "roughness"
+      ],
+      "title": "CompactPoreSpec",
+      "type": "object"
+    },
+    "DistributionSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "title": "Family",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        },
+        "components": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/MixtureComponent"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Components"
+        },
+        "alpha": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alpha"
+        },
+        "beta": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Beta"
+        },
+        "mean": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mean"
+        },
+        "mu": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mu"
+        },
+        "sigma": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sigma"
+        },
+        "s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "S"
+        },
+        "scale": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scale"
+        },
+        "loc": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Loc"
+        },
+        "shape": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shape"
+        },
+        "k": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "K"
+        },
+        "theta": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Theta"
+        },
+        "lower": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lower"
+        },
+        "upper": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upper"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        }
+      },
+      "required": [
+        "family"
+      ],
+      "title": "DistributionSpec",
+      "type": "object"
+    },
+    "FilmSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "target_box_A": {
+          "$ref": "#/$defs/Box3D"
+        },
+        "packing_box_A": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Box3D"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "z_padding_A": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ZPaddingSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "target_box_A"
+      ],
+      "title": "FilmSpec",
+      "type": "object"
+    },
+    "FormalTargets": {
+      "additionalProperties": false,
+      "properties": {
+        "position_quantity": {
+          "$ref": "#/$defs/PositionQuantityTargets"
+        },
+        "shape": {
+          "$ref": "#/$defs/ShapeTargets"
+        },
+        "proportion": {
+          "$ref": "#/$defs/ProportionTargets"
+        }
+      },
+      "required": [
+        "position_quantity",
+        "shape",
+        "proportion"
+      ],
+      "title": "FormalTargets",
+      "type": "object"
+    },
+    "GenerationControlSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "seed_number_density_A3": {
+          "exclusiveMinimum": 0,
+          "title": "Seed Number Density A3",
+          "type": "number"
+        },
+        "channel_fraction_by_count": {
+          "default": 1.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Channel Fraction By Count",
+          "type": "number"
+        },
+        "channel_to_compact_mean_volume_ratio": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "Channel To Compact Mean Volume Ratio",
+          "type": "number"
+        },
+        "compact_relative_volume": {
+          "$ref": "#/$defs/DistributionSpec"
+        },
+        "channel_relative_volume": {
+          "$ref": "#/$defs/DistributionSpec"
+        },
+        "compact_roughness": {
+          "$ref": "#/$defs/DistributionSpec"
+        },
+        "channel_roughness": {
+          "$ref": "#/$defs/DistributionSpec"
+        }
+      },
+      "required": [
+        "seed_number_density_A3"
+      ],
+      "title": "GenerationControlSpec",
+      "type": "object"
+    },
+    "GlobalPoreSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "seed_number_density_A3": {
+          "exclusiveMinimum": 0,
+          "title": "Seed Number Density A3",
+          "type": "number"
+        },
+        "target_porosity": {
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Target Porosity",
+          "type": "number"
+        },
+        "channel_fraction_by_count": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Channel Fraction By Count",
+          "type": "number"
+        },
+        "channel_to_compact_mean_volume_ratio": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "Channel To Compact Mean Volume Ratio",
+          "type": "number"
+        }
+      },
+      "required": [
+        "seed_number_density_A3",
+        "target_porosity",
+        "channel_fraction_by_count"
+      ],
+      "title": "GlobalPoreSpec",
+      "type": "object"
+    },
+    "MatrixConstraintSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "require_x_percolation": {
+          "default": true,
+          "title": "Require X Percolation",
+          "type": "boolean"
+        },
+        "minimum_cross_section_fraction": {
+          "default": 0.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Minimum Cross Section Fraction",
+          "type": "number"
+        },
+        "maximum_overlap_fraction": {
+          "default": 0.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Maximum Overlap Fraction",
+          "type": "number"
+        },
+        "minimum_skeleton_thickness_A": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Skeleton Thickness A"
+        }
+      },
+      "title": "MatrixConstraintSpec",
+      "type": "object"
+    },
+    "MeasurementSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "z_slice_spacing_A": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "Z Slice Spacing A",
+          "type": "number"
+        },
+        "center_min_separation_A": {
+          "default": 2.0,
+          "exclusiveMinimum": 0,
+          "title": "Center Min Separation A",
+          "type": "number"
+        },
+        "center_tracking_max_displacement_A": {
+          "default": 4.0,
+          "exclusiveMinimum": 0,
+          "title": "Center Tracking Max Displacement A",
+          "type": "number"
+        },
+        "center_distance_bin_width_A": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "Center Distance Bin Width A",
+          "type": "number"
+        },
+        "center_distance_max_A": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Center Distance Max A"
+        },
+        "center_distance_reference_samples": {
+          "default": 4096,
+          "exclusiveMinimum": 0,
+          "title": "Center Distance Reference Samples",
+          "type": "integer"
+        },
+        "centerline_sample_spacing_A": {
+          "default": 2.0,
+          "exclusiveMinimum": 0,
+          "title": "Centerline Sample Spacing A",
+          "type": "number"
+        },
+        "cross_section_spacing_A": {
+          "default": 2.0,
+          "exclusiveMinimum": 0,
+          "title": "Cross Section Spacing A",
+          "type": "number"
+        },
+        "boundary_resample_spacing_A": {
+          "default": 0.5,
+          "exclusiveMinimum": 0,
+          "title": "Boundary Resample Spacing A",
+          "type": "number"
+        },
+        "curvature_smoothing_length_A": {
+          "default": 1.0,
+          "minimum": 0,
+          "title": "Curvature Smoothing Length A",
+          "type": "number"
+        },
+        "branch_exclusion_length_A": {
+          "default": 2.0,
+          "minimum": 0,
+          "title": "Branch Exclusion Length A",
+          "type": "number"
+        },
+        "surface_exclusion_length_A": {
+          "default": 2.0,
+          "minimum": 0,
+          "title": "Surface Exclusion Length A",
+          "type": "number"
+        },
+        "orientation_projection_min_fraction": {
+          "default": 0.05,
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Orientation Projection Min Fraction",
+          "type": "number"
+        }
+      },
+      "title": "MeasurementSpec",
+      "type": "object"
+    },
+    "MixtureComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "weight": {
+          "minimum": 0,
+          "title": "Weight",
+          "type": "number"
+        },
+        "family": {
+          "title": "Family",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        },
+        "components": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/MixtureComponent"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Components"
+        },
+        "alpha": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alpha"
+        },
+        "beta": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Beta"
+        },
+        "mean": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mean"
+        },
+        "mu": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mu"
+        },
+        "sigma": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sigma"
+        },
+        "s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "S"
+        },
+        "scale": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scale"
+        },
+        "loc": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Loc"
+        },
+        "shape": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shape"
+        },
+        "k": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "K"
+        },
+        "theta": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Theta"
+        },
+        "lower": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lower"
+        },
+        "upper": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upper"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        }
+      },
+      "required": [
+        "weight",
+        "family"
+      ],
+      "title": "MixtureComponent",
+      "type": "object"
+    },
+    "OptimizationSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "seed_panel": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Seed Panel"
+        }
+      },
+      "title": "OptimizationSpec",
+      "type": "object"
+    },
+    "OrientationSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "distribution": {
+          "$ref": "#/$defs/DistributionSpec"
+        },
+        "azimuth": {
+          "default": "uniform",
+          "title": "Azimuth",
+          "type": "string"
+        }
+      },
+      "title": "OrientationSpec",
+      "type": "object"
+    },
+    "OutputSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "format": "path",
+          "title": "Root",
+          "type": "string"
+        },
+        "write_plots": {
+          "default": true,
+          "title": "Write Plots",
+          "type": "boolean"
+        }
+      },
+      "title": "OutputSpec",
+      "type": "object"
+    },
+    "PairedOrientationComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "weight": {
+          "minimum": 0,
+          "title": "Weight",
+          "type": "number"
+        },
+        "theta_xz_deg": {
+          "$ref": "#/$defs/DistributionSpec"
+        },
+        "theta_xy_deg": {
+          "$ref": "#/$defs/DistributionSpec"
+        }
+      },
+      "required": [
+        "weight",
+        "theta_xz_deg",
+        "theta_xy_deg"
+      ],
+      "title": "PairedOrientationComponent",
+      "type": "object"
+    },
+    "PairedOrientationSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "const": "paired_projected_planes",
+          "default": "paired_projected_planes",
+          "title": "Model",
+          "type": "string"
+        },
+        "components": {
+          "items": {
+            "$ref": "#/$defs/PairedOrientationComponent"
+          },
+          "title": "Components",
+          "type": "array"
+        }
+      },
+      "required": [
+        "components"
+      ],
+      "title": "PairedOrientationSpec",
+      "type": "object"
+    },
+    "ParallelSourceSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": "config",
+          "title": "Enabled",
+          "type": "string"
+        },
+        "strategy": {
+          "default": "config",
+          "title": "Strategy",
+          "type": "string"
+        },
+        "max_workers": {
+          "default": "config",
+          "title": "Max Workers",
+          "type": "string"
+        }
+      },
+      "title": "ParallelSourceSpec",
+      "type": "object"
+    },
+    "ParallelSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "strategy": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "seeds",
+            "candidates",
+            "serial"
+          ],
+          "title": "Strategy",
+          "type": "string"
+        },
+        "max_workers": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Workers"
+        },
+        "cpu_fraction": {
+          "default": 0.8,
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Cpu Fraction",
+          "type": "number"
+        },
+        "memory_fraction": {
+          "default": 0.75,
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Memory Fraction",
+          "type": "number"
+        },
+        "worker_threads": {
+          "const": 1,
+          "default": 1,
+          "title": "Worker Threads",
+          "type": "integer"
+        },
+        "start_method": {
+          "const": "spawn",
+          "default": "spawn",
+          "title": "Start Method",
+          "type": "string"
+        },
+        "sources": {
+          "$ref": "#/$defs/ParallelSourceSpec"
+        }
+      },
+      "title": "ParallelSpec",
+      "type": "object"
+    },
+    "PoreMaterialSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "pdb": {
+          "format": "path",
+          "title": "Pdb",
+          "type": "string"
+        },
+        "target_density_g_cm3": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Density G Cm3"
+        },
+        "molecule_count": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Molecule Count"
+        }
+      },
+      "required": [
+        "pdb"
+      ],
+      "title": "PoreMaterialSpec",
+      "type": "object"
+    },
+    "PositionQuantityTargets": {
+      "additionalProperties": false,
+      "properties": {
+        "center_distance_xy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/XYCenterDistanceTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "PositionQuantityTargets",
+      "type": "object"
+    },
+    "ProportionTargets": {
+      "additionalProperties": false,
+      "properties": {
+        "porosity": {
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Porosity",
+          "type": "number"
+        }
+      },
+      "required": [
+        "porosity"
+      ],
+      "title": "ProportionTargets",
+      "type": "object"
+    },
+    "RDFComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "default": "peak",
+          "enum": [
+            "peak",
+            "dip",
+            "exclusion",
+            "oscillation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "amplitude": {
+          "default": 1.0,
+          "minimum": 0,
+          "title": "Amplitude",
+          "type": "number"
+        },
+        "center_xi": {
+          "minimum": 0,
+          "title": "Center Xi",
+          "type": "number"
+        },
+        "width_xi": {
+          "exclusiveMinimum": 0,
+          "title": "Width Xi",
+          "type": "number"
+        }
+      },
+      "required": [
+        "center_xi",
+        "width_xi"
+      ],
+      "title": "RDFComponent",
+      "type": "object"
+    },
+    "ShapeTargets": {
+      "additionalProperties": false,
+      "properties": {
+        "equivalent_diameter_A": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistributionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "orientation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PairedOrientationSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "compact_aspect_ratio": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistributionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "channel_aspect_ratio": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistributionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "channel_tortuosity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistributionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "curvature_fluctuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistributionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "ShapeTargets",
+      "type": "object"
+    },
+    "TaskSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "random_seed": {
+          "title": "Random Seed",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "random_seed"
+      ],
+      "title": "TaskSpec",
+      "type": "object"
+    },
+    "XYCenterDistanceTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "components": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/XYDistanceComponent"
+          },
+          "title": "Components",
+          "type": "array"
+        }
+      },
+      "title": "XYCenterDistanceTarget",
+      "type": "object"
+    },
+    "XYDistanceComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "default": "peak",
+          "enum": [
+            "peak",
+            "dip",
+            "exclusion",
+            "oscillation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "amplitude": {
+          "default": 1.0,
+          "minimum": 0,
+          "title": "Amplitude",
+          "type": "number"
+        },
+        "center_A": {
+          "minimum": 0,
+          "title": "Center A",
+          "type": "number"
+        },
+        "width_A": {
+          "exclusiveMinimum": 0,
+          "title": "Width A",
+          "type": "number"
+        }
+      },
+      "required": [
+        "center_A",
+        "width_A"
+      ],
+      "title": "XYDistanceComponent",
+      "type": "object"
+    },
+    "ZPaddingSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "lower": {
+          "minimum": 0,
+          "title": "Lower",
+          "type": "number"
+        },
+        "upper": {
+          "minimum": 0,
+          "title": "Upper",
+          "type": "number"
+        }
+      },
+      "required": [
+        "lower",
+        "upper"
+      ],
+      "title": "ZPaddingSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 3,
+      "default": 3,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_schema_version": {
+      "default": 3,
+      "enum": [
+        2,
+        3
+      ],
+      "title": "Source Schema Version",
+      "type": "integer"
+    },
+    "task": {
+      "$ref": "#/$defs/TaskSpec"
+    },
+    "film": {
+      "$ref": "#/$defs/FilmSpec"
+    },
+    "formal_targets": {
+      "$ref": "#/$defs/FormalTargets"
+    },
+    "generation_controls": {
+      "$ref": "#/$defs/GenerationControlSpec"
+    },
+    "measurement": {
+      "$ref": "#/$defs/MeasurementSpec"
+    },
+    "pores": {
+      "$ref": "#/$defs/GlobalPoreSpec"
+    },
+    "center_distribution": {
+      "$ref": "#/$defs/CenterDistributionSpec"
+    },
+    "compact": {
+      "$ref": "#/$defs/CompactPoreSpec"
+    },
+    "pore_material": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PoreMaterialSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "orientation": {
+      "$ref": "#/$defs/OrientationSpec"
+    },
+    "channel": {
+      "$ref": "#/$defs/ChannelPoreSpec"
+    },
+    "matrix_constraints": {
+      "$ref": "#/$defs/MatrixConstraintSpec"
+    },
+    "audit": {
+      "$ref": "#/$defs/AuditSpec"
+    },
+    "output": {
+      "$ref": "#/$defs/OutputSpec"
+    },
+    "optimization": {
+      "$ref": "#/$defs/OptimizationSpec"
+    },
+    "parallel": {
+      "$ref": "#/$defs/ParallelSpec"
+    }
+  },
+  "required": [
+    "task",
+    "film",
+    "formal_targets",
+    "generation_controls",
+    "pores",
+    "center_distribution",
+    "compact"
+  ],
+  "title": "GeneratorConfig",
+  "type": "object"
+}

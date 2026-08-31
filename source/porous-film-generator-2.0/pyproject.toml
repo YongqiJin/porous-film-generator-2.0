@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "porous-film-generator"
+version = "0.4.0.dev1"
+description = "Auditable 3D porous-film geometry and pore-phase molecule generator"
+requires-python = ">=3.12"
+dependencies = [
+  "gemmi>=0.7.3",
+  "h5py>=3.12",
+  "numpy>=2.1",
+  "psutil>=7.0",
+  "pydantic>=2.10",
+  "pyyaml>=6.0.2",
+  "rich>=13.9",
+  "scikit-image>=0.25",
+  "scipy>=1.15",
+  "threadpoolctl>=3.6",
+  "trimesh>=4.6",
+  "typer>=0.15",
+  "tzdata>=2026.3",
+]
+
+[project.scripts]
+porous-film = "porous_film.cli:app"
+porous-film-validate = "porous_film_validator.cli:app"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/porous_film", "src/porous_film_validator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+cache_dir = ".pytest-tmp/pytest_cache"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

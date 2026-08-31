@@ -1,0 +1,7 @@
+interface:
+  display_name: "Porous Film Generator"
+  short_description: "Configure, run, and audit porous-film generation"
+  default_prompt: "Use $porous-film-generator to explain or run a porous-film generation workflow."
+
+policy:
+  allow_implicit_invocation: true

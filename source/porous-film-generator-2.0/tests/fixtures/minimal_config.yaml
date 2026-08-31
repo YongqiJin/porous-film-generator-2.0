@@ -1,0 +1,45 @@
+task:
+  name: minimal-e2e
+  random_seed: 11
+film:
+  target_box_A: {x: 20, y: 20, z: 20}
+  packing_box_A: {x: 20, y: 20, z: 30}
+pores:
+  seed_number_density_A3: 0.000125
+  target_porosity: 0.10
+  channel_fraction_by_count: 0.0
+  channel_to_compact_mean_volume_ratio: 1.0
+center_distribution:
+  mode: lattice_jitter
+  lattice: simple_cubic
+  position_jitter: 0.0
+orientation:
+  distribution:
+    family: beta
+    alpha: 2.0
+    beta: 2.0
+  azimuth: uniform
+compact:
+  relative_volume: {family: constant, value: 1.0}
+  aspect_ratio: {family: constant, value: 1.0}
+  roughness: {family: constant, value: 0.0}
+matrix_constraints:
+  require_x_percolation: true
+  minimum_cross_section_fraction: 0.05
+pore_material:
+  pdb: argon.pdb
+  molecule_count: 1
+geometry_audit:
+  enabled: false
+  candidate_count_per_round: 1
+  maximum_rounds: 1
+  coarse_spacing_A: 2.0
+  fine_spacing_A: 1.0
+parallel:
+  enabled: true
+  strategy: auto
+  max_workers: null
+  cpu_fraction: 0.80
+  memory_fraction: 0.75
+  worker_threads: 1
+  start_method: spawn

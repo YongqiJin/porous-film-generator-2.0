@@ -1,0 +1,31 @@
+{
+  "axis_order": "zyx",
+  "final_phase_file": "final_phase.h5",
+  "format_version": 1,
+  "length_unit": "angstrom",
+  "origin_A": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "periodic_axes": [
+    "x",
+    "y"
+  ],
+  "phase_encoding": {
+    "pore": 1,
+    "semiconductor": 0
+  },
+  "run_identifier": "phase-field-only",
+  "target_box_A": [
+    10.0,
+    10.0,
+    10.0
+  ],
+  "target_origin_A": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "task_id": "phase-field-only"
+}
