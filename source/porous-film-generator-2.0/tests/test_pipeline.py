@@ -1245,6 +1245,7 @@ def test_geometry_artifacts_write_final_phase_centerlines_and_cross_sections(
     assert (paths.qa_export / "semiconductor_solid_target.glb").is_file()
     assert (paths.qa_export / "checksums.sha256").is_file()
     assert (paths.outputs / "semiconductor_solid_target.glb").is_file()
+    assert (paths.outputs / "visual-report" / "index.html").is_file()
     with h5py.File(paths.qa_export / "final_centerlines.h5", "r") as handle:
         assert handle.attrs["schema_version"] == 3
         assert len(handle["centerlines"]) >= 1

@@ -80,6 +80,10 @@ measurements, GLB/PLY surfaces, normalized input, audit summaries, and checksums
 channel curves remain available as generation provenance. See
 skills/porous-film-generator/references/output-artifacts.md for the complete inventory.
 
+When `output.write_plots` is true, each geometry run also writes a self-contained interactive report
+to `outputs/visual-report/index.html`. It contains Geometry, Validation, Optimization, and
+Performance pages and does not require a web service.
+
 ## Parallel execution
 
 Candidate and seed multiprocessing are CPU-only. The generator itself does not use GPUs. Use
