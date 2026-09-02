@@ -31,6 +31,7 @@ from porous_film.metrics.local_thickness import (
     ThicknessStabilityResult,
     compare_local_thickness_coarse_fine,
 )
+from porous_film.performance import profile_stage
 from porous_film.voxel import PhaseGrid
 from porous_film.voxel.grid import voxelize_geometry
 
@@ -111,6 +112,16 @@ def compare_samples_to_distribution(
 
 
 def audit_target_distributions(
+    config: GeneratorConfig,
+    built: BuiltGeometry,
+    center_plan: CenterSeedPlan,
+    grid: PhaseGrid,
+) -> AuditResult:
+    with profile_stage("validation"):
+        return _audit_target_distributions(config, built, center_plan, grid)
+
+
+def _audit_target_distributions(
     config: GeneratorConfig,
     built: BuiltGeometry,
     center_plan: CenterSeedPlan,

@@ -5,6 +5,7 @@ import hashlib
 import json
 import pickle
 import shutil
+import time
 from collections.abc import Sequence
 from concurrent.futures import Executor
 from dataclasses import asdict, dataclass, replace
@@ -69,6 +70,12 @@ from porous_film.parallel import (
     write_parallel_summary,
 )
 from porous_film.parallel.seeds import SeedTask, SeedTaskResult, _execute_seed_body
+from porous_film.performance import (
+    PerformanceSnapshot,
+    RuntimeProfiler,
+    activate_runtime_profiler,
+    profile_stage,
+)
 from porous_film.reporting.markdown import write_preflight_report, write_run_report
 from porous_film.reporting.visual import write_visual_report
 from porous_film.storage import (
@@ -107,6 +114,7 @@ class GeometryRun:
     paths: TaskPaths
     candidate_results: tuple[CandidateResult, ...]
     selected_candidate: CandidateIdentity
+    performance: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -201,10 +209,12 @@ def generate_geometry(
     candidate_executor: Executor | None = None,
 ) -> GeometryRun:
     """Generate and audit a pore geometry without packing molecules."""
+    run_started_at = time.perf_counter()
     tasks = build_candidate_tasks(config)
     plan = execution_plan or _candidate_execution_plan(config, len(tasks))
     write_parallel_plan(paths, plan)
     started = datetime.now(_SHANGHAI)
+    candidate_search_started_at = time.perf_counter()
     serial_fallback_reason: str | None = None
     if candidate_executor is not None:
         try:
@@ -314,6 +324,7 @@ def generate_geometry(
             _write_parallel_progress(paths, result)
 
     ordered_results = tuple(sorted(results, key=lambda result: result.sequence_index))
+    candidate_search_wall_time_seconds = time.perf_counter() - candidate_search_started_at
     write_parallel_summary(
         paths,
         plan,
@@ -327,7 +338,8 @@ def generate_geometry(
     _write_candidate_records(paths, ordered_results)
 
     selected = select_candidate(config, ordered_results)
-    replay = replay_candidate(config, selected.identity)
+    replay_profiler = RuntimeProfiler()
+    replay = replay_candidate(config, selected.identity, profiler=replay_profiler)
     _require_replay_matches_summary(replay, selected)
     run = GeometryRun(
         config=config,
@@ -338,8 +350,14 @@ def generate_geometry(
         candidate_results=ordered_results,
         selected_candidate=selected.identity,
     )
-    _write_geometry_artifacts(config, run)
-    return run
+    return _write_geometry_artifacts(
+        config,
+        run,
+        runtime_profiler=replay_profiler,
+        run_started_at=run_started_at,
+        candidate_search_wall_time_seconds=candidate_search_wall_time_seconds,
+        selected_replay_wall_time_seconds=replay.performance.wall_time_seconds,
+    )
 
 
 def _candidate_execution_plan(
@@ -387,6 +405,39 @@ def _candidate_record(result: CandidateResult) -> dict[str, Any]:
         "failure_type": result.failure_type,
         "failure_message": result.failure_message,
         "wall_time_seconds": result.wall_time_seconds,
+    }
+
+
+def _geometry_performance_record(
+    snapshot: PerformanceSnapshot,
+    *,
+    candidates: Sequence[CandidateResult],
+    candidate_search_wall_time_seconds: float | None,
+    selected_replay_wall_time_seconds: float | None,
+    total_wall_time_seconds: float,
+) -> dict[str, Any]:
+    worker_peaks = [
+        float(result.performance.peak_rss_mib)
+        for result in candidates
+        if result.performance is not None
+    ]
+    return {
+        "measurement_scope": (
+            "wall-clock timings through scientific artifact export; visual-report rendering "
+            "and final checksum refresh are excluded"
+        ),
+        "total_wall_time_seconds": float(total_wall_time_seconds),
+        "candidate_search_wall_time_seconds": candidate_search_wall_time_seconds,
+        "selected_replay_wall_time_seconds": selected_replay_wall_time_seconds,
+        "candidate_wall_time_sum_seconds": float(
+            sum(result.wall_time_seconds for result in candidates)
+        ),
+        "stage_timings_seconds": snapshot.stage_seconds,
+        "stage_inclusive_seconds": snapshot.stage_inclusive_seconds,
+        "stage_call_counts": snapshot.stage_call_counts,
+        "rss_start_mib": float(snapshot.rss_start_mib),
+        "peak_rss_mib": float(snapshot.peak_rss_mib),
+        "worker_peak_rss_mib": max(worker_peaks) if worker_peaks else None,
     }
 
 
@@ -912,28 +963,70 @@ def _packing_frame_result(
     )
 
 
-def _write_geometry_artifacts(config: GeneratorConfig, run: GeometryRun) -> None:
-    run.paths.qa_export.mkdir(parents=True, exist_ok=True)
-    for unit in run.built.units:
-        _append_jsonl(run.paths.qa_export / "unit_geometry.jsonl", unit.to_record())
-    run.phase_grid.write_hdf5(run.paths.qa_export / "final_phase.h5")
-    _write_normalized_config(config, run.paths.qa_export / "normalized_config.yaml")
-    _write_final_measurement_artifacts(run)
-    export_surface_ply(run.phase_grid, run.paths.qa_export / "final_surface.ply")
-    run.paths.outputs.mkdir(parents=True, exist_ok=True)
-    export_semiconductor_glb(
-        run.phase_grid,
-        run.paths.outputs / "semiconductor_solid_target.glb",
-        _qa_contract(config, run.phase_grid),
+def _write_geometry_artifacts(
+    config: GeneratorConfig,
+    run: GeometryRun,
+    *,
+    runtime_profiler: RuntimeProfiler | None = None,
+    run_started_at: float | None = None,
+    candidate_search_wall_time_seconds: float | None = None,
+    selected_replay_wall_time_seconds: float | None = None,
+) -> GeometryRun:
+    profiler = runtime_profiler or RuntimeProfiler()
+    with activate_runtime_profiler(profiler), profile_stage("export"):
+        run.paths.qa_export.mkdir(parents=True, exist_ok=True)
+        for unit in run.built.units:
+            _append_jsonl(run.paths.qa_export / "unit_geometry.jsonl", unit.to_record())
+        run.phase_grid.write_hdf5(run.paths.qa_export / "final_phase.h5")
+        _write_normalized_config(config, run.paths.qa_export / "normalized_config.yaml")
+        _write_final_measurement_artifacts(run)
+        export_surface_ply(run.phase_grid, run.paths.qa_export / "final_surface.ply")
+        run.paths.outputs.mkdir(parents=True, exist_ok=True)
+        export_semiconductor_glb(
+            run.phase_grid,
+            run.paths.outputs / "semiconductor_solid_target.glb",
+            _qa_contract(config, run.phase_grid),
+        )
+        shutil.copy2(
+            run.paths.outputs / "semiconductor_solid_target.glb",
+            run.paths.qa_export / "semiconductor_solid_target.glb",
+        )
+        _write_pore_geometry_hdf5(config, run)
+        _write_main_metrics(config, run, None)
+        _write_unit_metrics(run.built, run.paths.qa_export / "main_unit_metrics.csv")
+        _write_channel_curves(run.built, run.paths.qa_export / "channel_curves.h5")
+        write_qa_contract(
+            _qa_contract(config, run.phase_grid),
+            run.paths.qa_export,
+        )
+        write_run_report(
+            run.paths.reports / "geometry-report.md",
+            config=config,
+            status="accepted",
+            warnings=list(run.audit.warnings),
+            convergence={
+                "audit_passed": run.audit.passed,
+                "porosity": run.phase_grid.porosity,
+                "target_porosity": config.pores.target_porosity,
+            },
+            output_paths=[run.paths.qa_export / "unit_geometry.jsonl"],
+        )
+
+    snapshot = profiler.snapshot()
+    performance = _geometry_performance_record(
+        snapshot,
+        candidates=run.candidate_results,
+        candidate_search_wall_time_seconds=candidate_search_wall_time_seconds,
+        selected_replay_wall_time_seconds=selected_replay_wall_time_seconds,
+        total_wall_time_seconds=(
+            snapshot.wall_time_seconds
+            if run_started_at is None
+            else max(0.0, time.perf_counter() - run_started_at)
+        ),
     )
-    shutil.copy2(
-        run.paths.outputs / "semiconductor_solid_target.glb",
-        run.paths.qa_export / "semiconductor_solid_target.glb",
-    )
-    _write_pore_geometry_hdf5(config, run)
-    _write_main_metrics(config, run, None)
-    _write_unit_metrics(run.built, run.paths.qa_export / "main_unit_metrics.csv")
-    _write_channel_curves(run.built, run.paths.qa_export / "channel_curves.h5")
+    run = replace(run, performance=performance)
+    _write_json(run.paths.qa_export / "performance.json", performance)
+    write_qa_checksums(run.paths.qa_export)
     if config.output.write_plots:
         write_visual_report(
             run.paths.outputs / "visual-report" / "index.html",
@@ -943,24 +1036,9 @@ def _write_geometry_artifacts(config: GeneratorConfig, run: GeometryRun) -> None
             audit=run.audit,
             candidates=run.candidate_results,
             selected_sequence_index=run.selected_candidate.sequence_index,
+            performance=performance,
         )
-    write_qa_contract(
-        _qa_contract(config, run.phase_grid),
-        run.paths.qa_export,
-    )
-    write_qa_checksums(run.paths.qa_export)
-    write_run_report(
-        run.paths.reports / "geometry-report.md",
-        config=config,
-        status="accepted",
-        warnings=list(run.audit.warnings),
-        convergence={
-            "audit_passed": run.audit.passed,
-            "porosity": run.phase_grid.porosity,
-            "target_porosity": config.pores.target_porosity,
-        },
-        output_paths=[run.paths.qa_export / "unit_geometry.jsonl"],
-    )
+    return run
 
 
 def _write_final_measurement_artifacts(run: GeometryRun) -> None:

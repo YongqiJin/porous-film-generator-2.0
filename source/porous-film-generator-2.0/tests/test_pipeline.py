@@ -1244,8 +1244,12 @@ def test_geometry_artifacts_write_final_phase_centerlines_and_cross_sections(
     assert (paths.qa_export / "final_surface.ply").is_file()
     assert (paths.qa_export / "semiconductor_solid_target.glb").is_file()
     assert (paths.qa_export / "checksums.sha256").is_file()
+    assert (paths.qa_export / "performance.json").is_file()
     assert (paths.outputs / "semiconductor_solid_target.glb").is_file()
     assert (paths.outputs / "visual-report" / "index.html").is_file()
+    performance = json.loads((paths.qa_export / "performance.json").read_text())
+    assert performance["stage_timings_seconds"]["export"] >= 0.0
+    assert performance["peak_rss_mib"] > 0.0
     with h5py.File(paths.qa_export / "final_centerlines.h5", "r") as handle:
         assert handle.attrs["schema_version"] == 3
         assert len(handle["centerlines"]) >= 1

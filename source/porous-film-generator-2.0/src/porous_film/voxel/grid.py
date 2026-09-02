@@ -10,6 +10,7 @@ import h5py
 import numpy as np
 
 from porous_film.geometry import BuiltGeometry, PoreGeometry
+from porous_film.performance import profile_stage
 
 _SCHEMA_VERSION = 1
 _AXIS_ORDER = "zyx"
@@ -130,6 +131,16 @@ def voxelize_geometry(
     box_A: np.ndarray,
     spacing_A: float,
     max_points_per_chunk: int = 1_000_000,
+) -> PhaseGrid:
+    with profile_stage("voxelization"):
+        return _voxelize_geometry(geometry, box_A, spacing_A, max_points_per_chunk)
+
+
+def _voxelize_geometry(
+    geometry: PoreGeometry,
+    box_A: np.ndarray,
+    spacing_A: float,
+    max_points_per_chunk: int,
 ) -> PhaseGrid:
     target_box = _as_box(box_A)
     spacing = _positive_float(spacing_A, "spacing_A")

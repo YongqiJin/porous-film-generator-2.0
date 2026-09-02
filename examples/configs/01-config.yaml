@@ -1,0 +1,142 @@
+schema_version: 3
+task:
+  name: pfg-v2-example-01-dispersed-worms-small-preview25nm
+  random_seed: 26090111
+film:
+  target_box_A:
+    x: 15000.0
+    y: 15000.0
+    z: 3000.0
+formal_targets:
+  position_quantity:
+    center_distance_xy:
+      components:
+      - kind: exclusion
+        amplitude: 0.95
+        center_A: 0.0
+        width_A: 2300.0
+      - kind: peak
+        amplitude: 0.22
+        center_A: 6000.0
+        width_A: 1700.0
+  shape:
+    equivalent_diameter_A:
+      family: beta
+      alpha: 2.5
+      beta: 3.0
+      lower: 1600.0
+      upper: 4700.0
+    orientation:
+      model: paired_projected_planes
+      components:
+      - weight: 0.5
+        theta_xz_deg:
+          family: beta
+          alpha: 2.0
+          beta: 4.5
+          lower: 0.0
+          upper: 18.0
+        theta_xy_deg:
+          family: beta
+          alpha: 2.3
+          beta: 2.3
+          lower: 8.0
+          upper: 45.0
+      - weight: 0.5
+        theta_xz_deg:
+          family: beta
+          alpha: 2.0
+          beta: 4.0
+          lower: 0.0
+          upper: 24.0
+        theta_xy_deg:
+          family: beta
+          alpha: 2.3
+          beta: 2.3
+          lower: 45.0
+          upper: 85.0
+    compact_aspect_ratio:
+      family: beta
+      alpha: 2.0
+      beta: 3.0
+      lower: 1.0
+      upper: 2.8
+    channel_aspect_ratio:
+      family: beta
+      alpha: 2.2
+      beta: 2.8
+      lower: 2.0
+      upper: 4.0
+    channel_tortuosity:
+      family: beta
+      alpha: 2.0
+      beta: 3.0
+      lower: 1.05
+      upper: 1.24
+    curvature_fluctuation:
+      family: beta
+      alpha: 2.0
+      beta: 3.5
+      lower: 0.06
+      upper: 0.28
+  proportion:
+    porosity: 0.28
+generation_controls:
+  seed_number_density_A3: 1.8e-11
+  channel_fraction_by_count: 0.3
+  channel_to_compact_mean_volume_ratio: 1.1
+  compact_relative_volume:
+    family: beta
+    alpha: 3.0
+    beta: 3.0
+    lower: 0.7
+    upper: 1.3
+  channel_relative_volume:
+    family: beta
+    alpha: 3.0
+    beta: 3.0
+    lower: 0.8
+    upper: 1.35
+  compact_roughness:
+    family: constant
+    value: 0.0
+  channel_roughness:
+    family: constant
+    value: 0.0
+measurement:
+  z_slice_spacing_A: 250.0
+  center_min_separation_A: 800.0
+  center_tracking_max_displacement_A: 1400.0
+  center_distance_bin_width_A: 250.0
+  center_distance_max_A: 10000.0
+  center_distance_reference_samples: 8192
+  centerline_sample_spacing_A: 250.0
+  cross_section_spacing_A: 250.0
+  boundary_resample_spacing_A: 125.0
+  curvature_smoothing_length_A: 250.0
+  branch_exclusion_length_A: 500.0
+  surface_exclusion_length_A: 250.0
+  orientation_projection_min_fraction: 0.05
+matrix_constraints:
+  enabled: true
+  require_x_percolation: true
+  minimum_cross_section_fraction: 0.02
+  maximum_overlap_fraction: 0.95
+audit:
+  enabled: true
+  candidate_count_per_round: 1
+  maximum_rounds: 1
+  coarse_spacing_A: 500.0
+  fine_spacing_A: 250.0
+  orientation_aspect_ratio_tolerance: 0.5
+output:
+  root: runs
+  write_plots: true
+parallel:
+  enabled: false
+  strategy: serial
+  max_workers: null
+  cpu_fraction: 0.9
+  memory_fraction: 0.75
+  worker_threads: 1
+  start_method: spawn

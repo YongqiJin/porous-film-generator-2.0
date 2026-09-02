@@ -16,6 +16,12 @@ from porous_film.geometry.scaling import scale_built_geometry, scale_solver_tole
 from porous_film.metrics import AuditResult, audit_target_distributions
 from porous_film.parallel.payloads import canonical_config_payload
 from porous_film.parallel.runtime import numeric_thread_limits
+from porous_film.performance import (
+    PerformanceSnapshot,
+    RuntimeProfiler,
+    activate_runtime_profiler,
+    profile_stage,
+)
 from porous_film.voxel import PhaseGrid, solve_scale_for_porosity
 from porous_film.voxel.grid import voxelize_geometry
 
@@ -57,6 +63,7 @@ class CandidateArtifacts:
     phase_grid: PhaseGrid
     audit: AuditResult
     scale: float
+    performance: PerformanceSnapshot
 
 
 @dataclass(frozen=True)
@@ -71,6 +78,7 @@ class CandidateResult:
     failure_message: str | None
     traceback_text: str | None
     wall_time_seconds: float
+    performance: PerformanceSnapshot | None = None
 
     @property
     def sequence_index(self) -> int:
@@ -122,10 +130,11 @@ def _worker_serial_config(config: GeneratorConfig) -> GeneratorConfig:
 
 def evaluate_candidate_task(task: CandidateTask) -> CandidateResult:
     start = time.perf_counter()
+    profiler = RuntimeProfiler()
     try:
         config = GeneratorConfig.model_validate(task.config_payload)
         with numeric_thread_limits(1):
-            artifacts = _evaluate(config, task.identity)
+            artifacts = _evaluate(config, task.identity, profiler=profiler)
         return CandidateResult(
             identity=task.identity,
             succeeded=True,
@@ -137,6 +146,7 @@ def evaluate_candidate_task(task: CandidateTask) -> CandidateResult:
             failure_message=None,
             traceback_text=None,
             wall_time_seconds=time.perf_counter() - start,
+            performance=artifacts.performance,
         )
     except Exception as exc:  # noqa: BLE001 - worker must serialize ordinary failures
         return CandidateResult(
@@ -150,14 +160,17 @@ def evaluate_candidate_task(task: CandidateTask) -> CandidateResult:
             failure_message=str(exc),
             traceback_text=traceback.format_exc(),
             wall_time_seconds=time.perf_counter() - start,
+            performance=profiler.snapshot(),
         )
 
 
 def replay_candidate(
     config: GeneratorConfig,
     identity: CandidateIdentity,
+    *,
+    profiler: RuntimeProfiler | None = None,
 ) -> CandidateArtifacts:
-    return _evaluate(config, identity)
+    return _evaluate(config, identity, profiler=profiler)
 
 
 def select_candidate(
@@ -184,23 +197,45 @@ def select_candidate(
     )
 
 
-def _evaluate(config: GeneratorConfig, identity: CandidateIdentity) -> CandidateArtifacts:
-    rng = np.random.default_rng(identity.derived_random_seed)
-    center_plan = generate_centers(config, rng)
-    base_built = build_units(config, center_plan, rng)
-    scale, built, fine_grid = solve_scale_for_porosity(
-        lambda value: scale_built_geometry(base_built, value),
-        config.pores.target_porosity,
-        scale_solver_tolerance(config, config.audit.fine_spacing_A),
-        voxel_spacing_A=config.audit.fine_spacing_A,
+def _evaluate(
+    config: GeneratorConfig,
+    identity: CandidateIdentity,
+    *,
+    profiler: RuntimeProfiler | None = None,
+) -> CandidateArtifacts:
+    runtime = profiler or RuntimeProfiler()
+    with activate_runtime_profiler(runtime):
+        rng = np.random.default_rng(identity.derived_random_seed)
+        with profile_stage("center_seed_generation"):
+            center_plan = generate_centers(config, rng)
+        with profile_stage("shape_generation"):
+            base_built = build_units(config, center_plan, rng)
+
+        def build_at_scale(value: float) -> BuiltGeometry:
+            with profile_stage("shape_generation"):
+                return scale_built_geometry(base_built, value)
+
+        with profile_stage("scale_optimization"):
+            scale, built, fine_grid = solve_scale_for_porosity(
+                build_at_scale,
+                config.pores.target_porosity,
+                scale_solver_tolerance(config, config.audit.fine_spacing_A),
+                voxel_spacing_A=config.audit.fine_spacing_A,
+            )
+        voxelize_geometry(
+            built.geometry,
+            built.geometry.target_box_A,
+            config.audit.coarse_spacing_A,
+        )
+        audit = audit_target_distributions(config, built, center_plan, fine_grid)
+    return CandidateArtifacts(
+        identity,
+        built,
+        fine_grid,
+        audit,
+        float(scale),
+        runtime.snapshot(),
     )
-    voxelize_geometry(
-        built.geometry,
-        built.geometry.target_box_A,
-        config.audit.coarse_spacing_A,
-    )
-    audit = audit_target_distributions(config, built, center_plan, fine_grid)
-    return CandidateArtifacts(identity, built, fine_grid, audit, float(scale))
 
 
 __all__ = [

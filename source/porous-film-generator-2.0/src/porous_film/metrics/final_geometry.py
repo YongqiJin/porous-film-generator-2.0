@@ -10,6 +10,7 @@ from skimage.feature import peak_local_max
 from skimage.measure import find_contours
 
 from porous_film.config import MeasurementSpec
+from porous_film.performance import profile_stage
 from porous_film.voxel import PhaseGrid
 
 
@@ -112,22 +113,31 @@ def measure_final_geometry(
     grid: PhaseGrid,
     contract: MeasurementSpec,
 ) -> FinalGeometryMeasurements:
-    sampled_indices = _sampled_z_indices(
-        grid.pore_mask.shape[0],
-        grid.spacing_A,
-        contract.z_slice_spacing_A,
-    )
-    slices = tuple(
-        _measure_slice_centers(grid, int(z_index), contract)
-        for z_index in sampled_indices
-    )
-    centerlines, branch_count, branch_z_by_track = _track_slice_centers(
-        slices,
-        target_box_A=grid.target_box_A,
-        maximum_displacement_A=contract.center_tracking_max_displacement_A,
-        lower_index=int(sampled_indices[0]),
-        upper_index=int(sampled_indices[-1]),
-    )
+    with profile_stage("final_measurement"):
+        return _measure_final_geometry(grid, contract)
+
+
+def _measure_final_geometry(
+    grid: PhaseGrid,
+    contract: MeasurementSpec,
+) -> FinalGeometryMeasurements:
+    with profile_stage("centerline_generation"):
+        sampled_indices = _sampled_z_indices(
+            grid.pore_mask.shape[0],
+            grid.spacing_A,
+            contract.z_slice_spacing_A,
+        )
+        slices = tuple(
+            _measure_slice_centers(grid, int(z_index), contract)
+            for z_index in sampled_indices
+        )
+        centerlines, branch_count, branch_z_by_track = _track_slice_centers(
+            slices,
+            target_box_A=grid.target_box_A,
+            maximum_displacement_A=contract.center_tracking_max_displacement_A,
+            lower_index=int(sampled_indices[0]),
+            upper_index=int(sampled_indices[-1]),
+        )
     through_slices = _through_center_slices(slices, centerlines)
     center_distance = _measure_xy_center_distance_distribution(
         through_slices,
