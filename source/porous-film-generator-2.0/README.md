@@ -30,6 +30,29 @@ skills/porous-film-generator/SKILL.md.
     uv run porous-film generate-geometry --config config.yaml --result-root C:\Calculation_results
     uv run porous-film-validate <run>\qa_export
 
+### Optional CUDA voxel backend
+
+The CPU implementation remains the default scientific reference. Install the optional CUDA
+dependency and select the GPU backend explicitly:
+
+    uv sync --frozen --all-groups --extra gpu
+    POROUS_FILM_VOXEL_BACKEND=cuda \
+      POROUS_FILM_CUDA_DEVICE=0 \
+      uv run --extra gpu porous-film generate-geometry \
+      --config config.yaml \
+      --result-root /path/to/results
+
+`POROUS_FILM_VOXEL_BACKEND` accepts `cpu`, `cuda`, or `auto`. The CUDA path uses CuPy float64 and
+accelerates periodic SDF evaluation and voxelization; center extraction, connectivity, final
+measurement, export, and the independent validator remain on the CPU. Optional memory/performance
+controls are `POROUS_FILM_GPU_MAX_POINTS_PER_CHUNK` (default `262144`) and
+`POROUS_FILM_GPU_SEGMENT_BATCH_SIZE` (default `32`).
+
+The GPU implementation must be checked against the CPU reference for every scientific change.
+Tests compare pointwise SDF values, exact pore masks, porosity, and deterministic phase hashes.
+Using float32 or accepting boundary-voxel differences is a scientific behavior change, not a
+routine performance option.
+
 Schema-v3 phase-field generation needs only target_box_A. It does not require a PDB, packing_box_A,
 or z_padding_A. Legacy molecule-packing inputs remain readable for compatibility.
 

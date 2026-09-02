@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from numbers import Integral
@@ -135,6 +136,26 @@ def voxelize_geometry(
     spacing = _positive_float(spacing_A, "spacing_A")
     chunk_size = _positive_int(max_points_per_chunk, "max_points_per_chunk")
     counts_xyz = _grid_counts_xyz(target_box, spacing)
+    backend = _voxel_backend()
+    if backend == "cuda":
+        from porous_film.voxel import cupy_backend
+
+        if not cupy_backend.cuda_backend_available():
+            raise RuntimeError(
+                "CUDA voxel backend was requested but CuPy CUDA is unavailable"
+            )
+        pore_mask = cupy_backend.voxelize_geometry_cupy(
+            geometry,
+            counts_xyz=counts_xyz,
+            spacing_A=spacing,
+            max_points_per_chunk=chunk_size,
+        )
+        return PhaseGrid(
+            pore_mask=pore_mask,
+            origin_A=np.zeros(3, dtype=float),
+            spacing_A=spacing,
+            target_box_A=target_box,
+        )
     nx, ny, nz = (int(value) for value in counts_xyz)
     total_points = int(nx * ny * nz)
     flat_mask = np.empty(total_points, dtype=bool)
@@ -160,6 +181,19 @@ def voxelize_geometry(
         spacing_A=spacing,
         target_box_A=target_box,
     )
+
+
+def _voxel_backend() -> str:
+    requested = os.environ.get("POROUS_FILM_VOXEL_BACKEND", "cpu").strip().lower()
+    if requested not in {"cpu", "cuda", "auto"}:
+        raise ValueError(
+            "POROUS_FILM_VOXEL_BACKEND must be one of: cpu, cuda, auto"
+        )
+    if requested != "auto":
+        return requested
+    from porous_film.voxel import cupy_backend
+
+    return "cuda" if cupy_backend.cuda_backend_available() else "cpu"
 
 
 def solve_scale_for_porosity(

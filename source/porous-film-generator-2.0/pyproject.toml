@@ -23,6 +23,11 @@ dependencies = [
   "tzdata>=2026.3",
 ]
 
+[project.optional-dependencies]
+gpu = [
+  "cupy-cuda12x==13.6.0",
+]
+
 [project.scripts]
 porous-film = "porous_film.cli:app"
 porous-film-validate = "porous_film_validator.cli:app"
