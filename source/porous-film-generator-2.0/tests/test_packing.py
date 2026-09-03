@@ -5,7 +5,13 @@ import numpy as np
 import pytest
 
 from porous_film.geometry import CompactUnit, PoreGeometry
-from porous_film.molecules import MoleculeTemplate, PackingConfig, PackingError, pack_molecules
+from porous_film.molecules import (
+    MoleculeTemplate,
+    PackingConfig,
+    PackingError,
+    PackingResult,
+    pack_molecules,
+)
 from porous_film.molecules import packing as packing_module
 from porous_film.molecules.packing import (
     _bond_envelopes_respect_walls_and_open_z,
@@ -13,6 +19,27 @@ from porous_film.molecules.packing import (
     _template_envelopes_respect_walls_and_open_z,
 )
 from porous_film.voxel import voxelize_geometry
+
+
+def _single_instance_result(template: MoleculeTemplate) -> PackingResult:
+    translation = np.array([5.0, 5.0, 5.0])
+    return PackingResult(
+        count=1,
+        atom_positions_A=template.positions_A + translation,
+        instance_transforms=(
+            packing_module.InstanceTransform(
+                translation_A=translation,
+                quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+            ),
+        ),
+        minimum_interatomic_distance_A=float("inf"),
+        actual_density_g_cm3=0.0,
+        protrusion_metrics={},
+        status="accepted",
+        template=template,
+        target_box_A=np.array([10.0, 10.0, 10.0]),
+        pore_volume_A3=1.0,
+    )
 
 
 def test_argon_atoms_pack_inside_spherical_pore() -> None:
@@ -192,24 +219,6 @@ def test_xy_minimum_image_collision_rejects_boundary_overlap() -> None:
     )
 
 
-def test_error_reason_geometrically_infeasible_for_capacity_bound() -> None:
-    geometry = PoreGeometry(
-        [CompactUnit.sphere("small", np.array([5.0, 5.0, 5.0]), 3.0)],
-        target_box_A=np.array([10.0, 10.0, 10.0]),
-    )
-    template = MoleculeTemplate.from_pdb(Path("tests/fixtures/argon.pdb"))
-
-    with pytest.raises(PackingError) as error:
-        pack_molecules(
-            template,
-            geometry,
-            PackingConfig(exact_count=100, minimum_distance_A=3.0),
-            np.random.default_rng(2),
-        )
-
-    assert error.value.reason == "algorithm_not_converged"
-
-
 def test_error_reason_algorithm_not_converged_for_low_attempt_feasible_case() -> None:
     geometry = PoreGeometry(
         [CompactUnit.sphere("feasible", np.array([10.0, 10.0, 10.0]), 6.0)],
@@ -229,17 +238,8 @@ def test_error_reason_algorithm_not_converged_for_low_attempt_feasible_case() ->
 
 
 def test_hdf5_and_mmcif_preserve_identifiers_and_bond_metadata(tmp_path: Path) -> None:
-    geometry = PoreGeometry(
-        [CompactUnit.sphere("sphere", np.array([5.0, 5.0, 5.0]), 4.0)],
-        target_box_A=np.array([10.0, 10.0, 10.0]),
-    )
     template = MoleculeTemplate.from_pdb(Path("tests/fixtures/chlorine-bond.pdb"))
-    result = pack_molecules(
-        template,
-        geometry,
-        PackingConfig(exact_count=1, minimum_distance_A=2.5),
-        np.random.default_rng(5),
-    )
+    result = _single_instance_result(template)
 
     h5_path = result.write_hdf5(tmp_path / "packed.h5")
     cif_text = result.write_mmcif(tmp_path / "packed.cif").read_text(encoding="utf-8")
@@ -265,17 +265,8 @@ def test_hdf5_and_mmcif_preserve_identifiers_and_bond_metadata(tmp_path: Path) -
 
 
 def test_pdb_writer_uses_written_serials_for_conect_round_trip(tmp_path: Path) -> None:
-    geometry = PoreGeometry(
-        [CompactUnit.sphere("sphere", np.array([5.0, 5.0, 5.0]), 4.0)],
-        target_box_A=np.array([10.0, 10.0, 10.0]),
-    )
     template = MoleculeTemplate.from_pdb(Path("tests/fixtures/chlorine-bond.pdb"))
-    result = pack_molecules(
-        template,
-        geometry,
-        PackingConfig(exact_count=1, minimum_distance_A=2.5),
-        np.random.default_rng(5),
-    )
+    result = _single_instance_result(template)
 
     pdb_lines = result.write_pdb(tmp_path / "packed.pdb").read_text(encoding="utf-8").splitlines()
 

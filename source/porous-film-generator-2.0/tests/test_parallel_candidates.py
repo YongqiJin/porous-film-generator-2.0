@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import pickle
 from pathlib import Path
@@ -11,8 +11,10 @@ from porous_film.config import GeneratorConfig, load_config
 from porous_film.parallel.candidates import (
     CandidateResult,
     CandidateTask,
+    _updated_tortuosity_factors,
     build_candidate_tasks,
     evaluate_candidate_task,
+    evaluate_candidate_task_with_artifacts,
     replay_candidate,
     select_candidate,
 )
@@ -120,6 +122,34 @@ def test_worker_result_is_compact(sample_config_path: Path) -> None:
     assert result.succeeded is True
     assert isinstance(result.porosity, float)
     assert not any(isinstance(value, np.ndarray) for value in result.__dict__.values())
+
+
+def test_tortuosity_feedback_updates_bend_amplitude_from_final_measurements() -> None:
+    factors = _updated_tortuosity_factors(
+        np.array([1.0, 1.0, 1.0]),
+        baseline=np.array([1.002, 1.004, 1.006]),
+        observed=np.array([1.010, 1.020, 1.005]),
+        target=np.array([1.006, 1.040, 1.030]),
+    )
+
+    assert np.isclose(factors[0], np.sqrt(0.5))
+    assert factors[1] == 1.5
+    assert factors[2] == 2.0
+
+
+def test_in_process_candidate_returns_scientifically_identical_summary_and_artifacts(
+    sample_config_path: Path,
+) -> None:
+    task = build_candidate_tasks(load_config(sample_config_path))[0]
+
+    summary, artifacts = evaluate_candidate_task_with_artifacts(task)
+
+    assert artifacts is not None
+    assert summary.porosity == artifacts.phase_grid.porosity
+    assert summary.scale == artifacts.scale
+    assert summary.audit_passed == artifacts.audit.passed
+    assert summary.performance is not None
+    assert summary.performance.stage_call_counts["voxelization"] >= 1
 
 
 def test_replay_matches_summary(sample_config_path: Path) -> None:

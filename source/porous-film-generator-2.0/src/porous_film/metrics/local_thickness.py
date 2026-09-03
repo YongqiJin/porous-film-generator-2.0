@@ -45,8 +45,7 @@ def local_thickness_field(
         temporary_voxels = int(np.prod(np.asarray(mask.shape) + 2))
         if temporary_voxels > limit:
             raise ValueError(
-                "local-thickness temporaries exceed "
-                f"max_voxels={limit}: need {temporary_voxels}"
+                f"local-thickness temporaries exceed max_voxels={limit}: need {temporary_voxels}"
             )
         return _local_thickness_field_full(mask, spacing, periodic_xy=False, max_voxels=limit)
 
@@ -150,22 +149,33 @@ def _local_thickness_field_full(
         )
 
     edt_voxels = ndimage.distance_transform_edt(analysis_mask)
-    local_maxima = (
-        analysis_mask
-        & (edt_voxels > 0.0)
-        & (edt_voxels == ndimage.maximum_filter(edt_voxels, size=3, mode="constant"))
-    )
-    center_radii = np.floor(edt_voxels[central]).astype(np.int32)
-    center_radii = np.where(local_maxima[central], center_radii, 0)
-
     field = np.zeros(mask.shape, dtype=float)
-    max_radius = int(np.max(center_radii))
+    max_radius = int(np.floor(np.max(edt_voxels[central])))
     for radius in range(max_radius, 0, -1):
-        centers = np.argwhere(center_radii == radius)
+        footprint = _sphere_footprint(radius, max_voxels=max_voxels)
+        eligible_centers = ndimage.binary_erosion(
+            analysis_mask,
+            structure=footprint,
+            border_value=0,
+        )
+        if periodic_xy:
+            central_centers = eligible_centers[central]
+            tiled_centers = np.zeros_like(analysis_mask, dtype=bool)
+            tiled_centers[1 : 1 + mask.shape[0]] = np.tile(central_centers, (1, 3, 3))
+            coverage = ndimage.binary_dilation(
+                tiled_centers,
+                structure=footprint,
+                border_value=0,
+            )[central]
+        else:
+            coverage = ndimage.binary_dilation(
+                eligible_centers,
+                structure=footprint,
+                border_value=0,
+            )[central]
         diameter = 2.0 * radius * spacing
-        offsets = _sphere_offsets(radius, max_voxels=max_voxels)
-        for center in centers:
-            _write_sphere(field, mask, center, offsets, diameter, periodic_xy=periodic_xy)
+        better = coverage & mask & (field < diameter)
+        field[better] = diameter
     return field
 
 

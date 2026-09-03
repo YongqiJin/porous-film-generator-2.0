@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import ndimage
 from scipy.interpolate import CubicSpline, PchipInterpolator
 from scipy.optimize import brentq
 from scipy.special import logsumexp
@@ -205,6 +206,7 @@ def generate_variable_radius_channel_profile(
     shape_seed: int,
     *,
     target_equivalent_diameter_A: float | None = None,
+    measured_centerline_sample_count: int | None = None,
 ) -> VariableRadiusChannelProfile:
     target_volume = _positive_float(target_volume_A3, "target_volume_A3")
     target_diameter = (
@@ -239,13 +241,25 @@ def generate_variable_radius_channel_profile(
             end_distance_A=end_distance,
             target_arc_length_A=target_arc_length,
             require_multibend=tau_value > 1.05,
+            measured_centerline_sample_count=measured_centerline_sample_count,
         )
         centerline = sample_channel_centerline(controls, sample_count=1025)
         arc_length = float(np.linalg.norm(np.diff(centerline, axis=0), axis=1).sum())
         end_distance_actual = float(np.linalg.norm(centerline[-1] - centerline[0]))
-        if not np.isclose(arc_length / effective_diameter, eta_value, rtol=0.01):
+        if (
+            measured_centerline_sample_count is None
+            and not np.isclose(arc_length / effective_diameter, eta_value, rtol=0.01)
+        ):
             continue
-        if not np.isclose(arc_length / end_distance_actual, tau_value, rtol=0.01):
+        realized_tau = (
+            arc_length / end_distance_actual
+            if measured_centerline_sample_count is None
+            else _resolved_centerline_tortuosity(
+                controls,
+                measured_centerline_sample_count,
+            )
+        )
+        if not np.isclose(realized_tau, tau_value, rtol=0.01):
             continue
         profile = VariableRadiusChannelProfile(
             shape_seed=int(shape_seed),
@@ -360,6 +374,7 @@ def _generate_multibend_controls(
     end_distance_A: float,
     target_arc_length_A: float,
     require_multibend: bool,
+    measured_centerline_sample_count: int | None = None,
 ) -> np.ndarray:
     s = np.linspace(0.0, 1.0, _CHANNEL_PROFILE_NODE_COUNT)
     if target_arc_length_A <= end_distance_A * (1.0 + 1.0e-10):
@@ -390,14 +405,25 @@ def _generate_multibend_controls(
 
         low = 0.0
         high = max(end_distance_A, 1.0)
-        while _curve_arc_length(controls(high)) < target_arc_length_A:
+        target_tau = target_arc_length_A / end_distance_A
+
+        def objective(amplitude_A: float) -> float:
+            candidate = controls(amplitude_A)
+            if measured_centerline_sample_count is None:
+                return _curve_arc_length(candidate) / end_distance_A
+            return _resolved_centerline_tortuosity(
+                candidate,
+                measured_centerline_sample_count,
+            )
+
+        while objective(high) < target_tau:
             high *= 2.0
             if high > 1.0e6 * max(end_distance_A, 1.0):
                 break
         else:
             for _ in range(56):
                 middle = 0.5 * (low + high)
-                if _curve_arc_length(controls(middle)) < target_arc_length_A:
+                if objective(middle) < target_tau:
                     low = middle
                 else:
                     high = middle
@@ -409,6 +435,26 @@ def _generate_multibend_controls(
             ) > 1.0e-3:
                 return result
     raise ValueError("failed to generate nonplanar multibend controls")
+
+
+def _resolved_centerline_tortuosity(controls: np.ndarray, sample_count: int) -> float:
+    count = int(sample_count)
+    if count < 2:
+        raise ValueError("measured_centerline_sample_count must be at least 2")
+    sampled = sample_channel_centerline(controls, sample_count=count)
+    if count >= 4:
+        smoothed = np.column_stack(
+            [
+                ndimage.gaussian_filter1d(sampled[:, axis], sigma=0.5, mode="nearest")
+                for axis in range(3)
+            ]
+        )
+        smoothed[0] = sampled[0]
+        smoothed[-1] = sampled[-1]
+        sampled = smoothed
+    arc_length = float(np.linalg.norm(np.diff(sampled, axis=0), axis=1).sum())
+    end_distance = float(np.linalg.norm(sampled[-1] - sampled[0]))
+    return arc_length / end_distance
 
 
 def _curve_arc_length(controls: np.ndarray) -> float:

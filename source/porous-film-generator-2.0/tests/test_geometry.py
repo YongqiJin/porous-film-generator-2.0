@@ -5,7 +5,19 @@ from scipy.spatial.transform import Rotation
 
 from porous_film.centers import CenterSeedPlan
 from porous_film.config import GeneratorConfig
-from porous_film.geometry import ChannelUnit, CompactUnit, PoreGeometry, build_units
+from porous_film.geometry import (
+    BuiltGeometry,
+    ChannelUnit,
+    CompactUnit,
+    PoreGeometry,
+    adjust_channel_lateral_deviations_xy,
+    build_units,
+    minimum_scale_for_channels_through_z,
+    scale_built_geometry,
+    separate_channel_footprints_xy,
+)
+from porous_film.metrics import pore_z_connectivity_summary
+from porous_film.voxel import voxelize_geometry
 
 
 def _geometry_config(
@@ -42,8 +54,7 @@ def _geometry_config(
                 "azimuth": "uniform",
             },
             "compact": {
-                "relative_volume": compact_relative_volume
-                or {"family": "constant", "value": 1.0},
+                "relative_volume": compact_relative_volume or {"family": "constant", "value": 1.0},
                 "aspect_ratio": {"family": "constant", "value": compact_eta},
                 "roughness": {"family": "constant", "value": 0.0},
             },
@@ -129,16 +140,12 @@ def test_roughness_adds_to_unit_lipschitz_bound() -> None:
 def test_straight_channel_has_tau_one_and_continuous_negative_sdf() -> None:
     channel = ChannelUnit.from_polyline(
         unit_id="channel-0001",
-        control_points_unwrapped_A=np.array(
-            [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0], [10.0, 0.0, 0.0]]
-        ),
+        control_points_unwrapped_A=np.array([[0.0, 0.0, 0.0], [5.0, 0.0, 0.0], [10.0, 0.0, 0.0]]),
         cross_radius_A=1.0,
         roughness=0.0,
     )
 
-    sample = np.column_stack(
-        [np.linspace(0.0, 10.0, 21), np.zeros(21), np.zeros(21)]
-    )
+    sample = np.column_stack([np.linspace(0.0, 10.0, 21), np.zeros(21), np.zeros(21)])
 
     assert np.isclose(channel.tortuosity, 1.0)
     assert np.all(channel.sdf(sample) < 0.0)
@@ -463,6 +470,7 @@ def test_manual_simple_unit_constructors_keep_schema_v1() -> None:
     assert getattr(compact, "shape_model", None) is None
     assert getattr(channel, "shape_model", None) is None
 
+
 def test_scale_unit_preserves_complex_shape_similarity() -> None:
     from porous_film.geometry import scale_unit
 
@@ -612,13 +620,12 @@ def test_periodic_compact_sdf_uses_single_minimum_image_evaluation(
     brute_fields = []
     for x_shift in (-20.0, 0.0, 20.0):
         for y_shift in (-20.0, 0.0, 20.0):
-            brute_fields.append(
-                original(unit, points - np.array([x_shift, y_shift, 0.0]))
-            )
+            brute_fields.append(original(unit, points - np.array([x_shift, y_shift, 0.0])))
     expected = -logsumexp(-32.0 * np.vstack(brute_fields), axis=0) / 32.0
 
     assert call_count == 1
     assert np.allclose(optimized, expected, atol=1.0e-9)
+
 
 def test_variable_radius_channel_runtime_sdf_volume_matches_target() -> None:
     from scipy.stats import qmc
@@ -649,6 +656,7 @@ def test_variable_radius_channel_runtime_sdf_volume_matches_target() -> None:
 
     assert np.isclose(volume, target_volume, rtol=0.03)
 
+
 def test_compact_record_preserves_sampled_eta_separately_from_realized_envelope() -> None:
     from scipy.spatial.transform import Rotation
 
@@ -676,7 +684,9 @@ def test_compact_record_preserves_sampled_eta_separately_from_realized_envelope(
     record = compact.to_record()
 
     assert record["latent_parameters"]["eta"] == 2.5
-    assert np.isclose(record["realized_geometry"]["radii_A"][2] / record["realized_geometry"]["radii_A"][0], 2.0)
+    assert np.isclose(
+        record["realized_geometry"]["radii_A"][2] / record["realized_geometry"]["radii_A"][0], 2.0
+    )
 
 
 def _geometry_v3_config(*, seed_count: int = 10) -> GeneratorConfig:
@@ -834,3 +844,232 @@ def test_schema_v3_channel_uses_absolute_equivalent_diameter_target() -> None:
     assert record["latent_parameters"]["equivalent_diameter_A"] == 8.0
     assert record["latent_parameters"]["curvature_fluctuation_target"] == 0.4
     assert record["latent_parameters"]["target_volume_A3"] is None
+
+
+def test_unrestricted_schema_v3_builds_without_through_only_targets() -> None:
+    raw = _geometry_v3_config(seed_count=1).model_dump(mode="python")
+    raw["formal_targets"]["position_quantity"].pop("center_distance_xy")
+    for name in (
+        "equivalent_diameter_A",
+        "orientation",
+        "channel_aspect_ratio",
+        "channel_tortuosity",
+        "curvature_fluctuation",
+    ):
+        raw["formal_targets"]["shape"].pop(name)
+    for compatibility_key in (
+        "pores",
+        "center_distribution",
+        "compact",
+        "channel",
+        "orientation",
+    ):
+        raw.pop(compatibility_key)
+    raw["pore_constraints"] = {"z_connectivity": "unrestricted"}
+    config = GeneratorConfig.model_validate(raw)
+
+    built = build_units(
+        config,
+        _single_latent_plan(np.array([50.0, 50.0, 50.0])),
+        np.random.default_rng(307),
+    )
+
+    channel = built.units[0]
+    record = channel.to_record()["latent_parameters"]
+    assert isinstance(channel, ChannelUnit)
+    assert record["equivalent_diameter_A"] is None
+    assert record["curvature_fluctuation_target"] is None
+    assert record["orientation"]["paired_component_index"] is None
+
+
+def test_all_components_mode_places_generated_channel_through_finite_z() -> None:
+    raw = _geometry_v3_config(seed_count=1).model_dump(mode="python")
+    raw["film"]["target_box_A"]["z"] = 20.0
+    raw["film"]["packing_box_A"]["z"] = 20.0
+    raw["generation_controls"]["seed_number_density_A3"] = 1.0 / (100.0 * 100.0 * 20.0)
+    raw["formal_targets"]["shape"]["compact_aspect_ratio"] = None
+    raw["pore_constraints"] = {"z_connectivity": "all_components"}
+    config = GeneratorConfig.model_validate(raw)
+    plan = CenterSeedPlan(
+        intended_points_A=np.array([[50.0, 50.0, 3.0]]),
+        target_rdf_xi=np.array([0.0]),
+        target_rdf_values=np.array([1.0]),
+        starting_loss=0.0,
+        initialization_loss=0.0,
+    )
+
+    built = build_units(config, plan, np.random.default_rng(303))
+    grid = voxelize_geometry(built.geometry, np.array([100.0, 100.0, 20.0]), 2.0)
+
+    assert pore_z_connectivity_summary(grid.pore_mask).all_components_through
+
+
+def test_all_components_without_orientation_target_uses_z_spanning_default() -> None:
+    raw = _geometry_v3_config(seed_count=1).model_dump(mode="python")
+    raw["film"]["target_box_A"]["z"] = 20.0
+    raw["film"]["packing_box_A"]["z"] = 20.0
+    raw["generation_controls"]["seed_number_density_A3"] = 1.0 / (100.0 * 100.0 * 20.0)
+    raw["generation_controls"]["channel_fraction_by_count"] = 1.0
+    raw["formal_targets"]["position_quantity"]["center_distance_xy"] = None
+    for name in (
+        "equivalent_diameter_A",
+        "orientation",
+        "compact_aspect_ratio",
+        "channel_aspect_ratio",
+        "channel_tortuosity",
+        "curvature_fluctuation",
+    ):
+        raw["formal_targets"]["shape"][name] = None
+    for compatibility_key in (
+        "pores",
+        "center_distribution",
+        "compact",
+        "channel",
+        "orientation",
+    ):
+        raw.pop(compatibility_key)
+    raw["pore_constraints"] = {"z_connectivity": "all_components"}
+    config = GeneratorConfig.model_validate(raw)
+    plan = CenterSeedPlan(
+        intended_points_A=np.array([[50.0, 50.0, 3.0]]),
+        target_rdf_xi=np.array([0.0]),
+        target_rdf_values=np.array([1.0]),
+        starting_loss=0.0,
+        initialization_loss=0.0,
+    )
+
+    built = build_units(config, plan, np.random.default_rng(311))
+    channel = built.units[0]
+
+    assert isinstance(channel, ChannelUnit)
+    assert np.ptp(channel.centerline_samples_A[:, 2]) >= 20.0
+
+
+def test_all_components_lengthens_channel_when_eta_is_not_a_formal_target() -> None:
+    raw = _geometry_v3_config(seed_count=1).model_dump(mode="python")
+    raw["film"]["target_box_A"]["z"] = 100.0
+    raw["film"]["packing_box_A"]["z"] = 100.0
+    raw["generation_controls"]["seed_number_density_A3"] = 1.0 / (100.0**3)
+    raw["formal_targets"]["shape"]["compact_aspect_ratio"] = None
+    raw["formal_targets"]["shape"]["channel_aspect_ratio"] = None
+    raw["pore_constraints"] = {"z_connectivity": "all_components"}
+    config = GeneratorConfig.model_validate(raw)
+    plan = CenterSeedPlan(
+        intended_points_A=np.array([[50.0, 50.0, 50.0]]),
+        target_rdf_xi=np.array([0.0]),
+        target_rdf_values=np.array([1.0]),
+        starting_loss=0.0,
+        initialization_loss=0.0,
+    )
+
+    built = build_units(config, plan, np.random.default_rng(313))
+    channel = built.units[0]
+    dense_s = np.linspace(0.0, 1.0, 4097)
+    radii = channel._radius_at_normalized_arclength(dense_s)
+    equivalent_diameter = 2.0 * np.sqrt(np.trapezoid(radii**2, dense_s))
+
+    assert isinstance(channel, ChannelUnit)
+    assert np.ptp(channel.centerline_samples_A[:, 2]) >= 100.0
+    assert np.isclose(equivalent_diameter, 8.0, rtol=1.0e-3)
+    assert np.isclose(channel.tortuosity, 1.2, rtol=1.0e-2)
+    assert channel.eta > 4.0
+
+
+def test_z_through_channel_is_repositioned_after_global_porosity_scaling() -> None:
+    channel = ChannelUnit.from_polyline(
+        "channel-through",
+        np.array([[10.0, 10.0, -2.5], [35.0, 10.0, 17.5], [10.0, 10.0, 22.5]]),
+        2.0,
+        0.0,
+    )
+    built = BuiltGeometry(
+        geometry=PoreGeometry([channel], np.array([40.0, 40.0, 20.0])),
+        units=[channel],
+        realized_anchors_A=channel.anchor_A[np.newaxis, :],
+        latent_to_realized_ids={"latent-0000": channel.unit_id},
+    )
+    minimum_scale = minimum_scale_for_channels_through_z(built)
+
+    scaled = scale_built_geometry(
+        built,
+        minimum_scale * (1.0 + 1.0e-10),
+        require_channels_through_z=True,
+    )
+    scaled_channel = scaled.units[0]
+
+    assert isinstance(scaled_channel, ChannelUnit)
+    assert np.min(scaled_channel.centerline_samples_A[:, 2]) <= 0.0
+    assert np.max(scaled_channel.centerline_samples_A[:, 2]) >= 20.0
+
+
+def test_periodic_channel_footprint_relaxation_separates_overlapping_channels() -> None:
+    first = ChannelUnit.from_polyline(
+        "channel-a",
+        np.array([[5.0, 5.0, -1.0], [5.0, 5.0, 21.0]]),
+        2.0,
+        0.0,
+    )
+    second = ChannelUnit.from_polyline(
+        "channel-b",
+        np.array([[6.0, 5.0, -1.0], [6.0, 5.0, 21.0]]),
+        2.0,
+        0.0,
+    )
+    built = BuiltGeometry(
+        geometry=PoreGeometry([first, second], np.array([20.0, 20.0, 20.0])),
+        units=[first, second],
+        realized_anchors_A=np.vstack([first.anchor_A, second.anchor_A]),
+        latent_to_realized_ids={"latent-0000": first.unit_id, "latent-0001": second.unit_id},
+    )
+
+    separated = separate_channel_footprints_xy(built)
+    box_xy = np.array([20.0, 20.0])
+    delta = separated.units[1].anchor_A[:2] - separated.units[0].anchor_A[:2]
+    delta -= box_xy * np.round(delta / box_xy)
+
+    assert np.linalg.norm(delta) >= 4.0 - 1.0e-6
+    assert np.allclose(
+        separated.units[1].control_points_unwrapped_A - separated.units[1].anchor_A,
+        second.control_points_unwrapped_A - second.anchor_A,
+    )
+
+
+def test_channel_lateral_deviation_adjustment_preserves_z_and_straightens_xy() -> None:
+    channel = ChannelUnit.from_polyline(
+        "channel-bent",
+        np.array(
+            [
+                [2.0, 3.0, -5.0],
+                [6.0, 9.0, 5.0],
+                [8.0, 5.0, 15.0],
+                [12.0, 11.0, 25.0],
+            ]
+        ),
+        2.0,
+        0.0,
+        latent_tau=1.2,
+    )
+    built = BuiltGeometry(
+        geometry=PoreGeometry([channel], np.array([40.0, 40.0, 20.0])),
+        units=[channel],
+        realized_anchors_A=channel.anchor_A[np.newaxis, :],
+        latent_to_realized_ids={"latent-0000": channel.unit_id},
+    )
+
+    adjusted = adjust_channel_lateral_deviations_xy(built, {channel.unit_id: 0.0})
+    result = adjusted.units[0]
+
+    assert isinstance(result, ChannelUnit)
+    np.testing.assert_allclose(
+        result.control_points_unwrapped_A[:, 2],
+        channel.control_points_unwrapped_A[:, 2],
+    )
+    relative_z = (
+        result.control_points_unwrapped_A[:, 2] - result.control_points_unwrapped_A[0, 2]
+    ) / (result.control_points_unwrapped_A[-1, 2] - result.control_points_unwrapped_A[0, 2])
+    expected_xy = (1.0 - relative_z[:, np.newaxis]) * result.control_points_unwrapped_A[
+        0, :2
+    ] + relative_z[:, np.newaxis] * result.control_points_unwrapped_A[-1, :2]
+    np.testing.assert_allclose(result.control_points_unwrapped_A[:, :2], expected_xy)
+    np.testing.assert_allclose(result.anchor_A, channel.anchor_A)
+    assert result.latent_tau == channel.latent_tau

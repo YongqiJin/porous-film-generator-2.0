@@ -12,6 +12,7 @@ from porous_film import __version__
 from porous_film.config import GeneratorConfig, load_config
 from porous_film.parallel import apply_parallel_cli_overrides
 from porous_film.pipeline import (
+    GeometryRun,
     audit_packmol_output_run,
     audit_run,
     fill_pore_run,
@@ -53,6 +54,14 @@ def _load_config_with_parallel_overrides(
         raise typer.BadParameter(str(exc)) from exc
 
 
+def _echo_geometry_summary(result: GeometryRun) -> None:
+    performance = result.performance or {}
+    runtime_seconds = float(performance["total_wall_time_seconds"])
+    typer.echo(f"Result directory: {result.paths.root.resolve()}")
+    typer.echo(f"Runtime: {runtime_seconds:.2f} s")
+    typer.echo(f"Audit result: {'PASS' if result.audit.passed else 'FAIL'}")
+
+
 @app.command("preflight")
 def preflight_cmd(
     config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)],
@@ -91,7 +100,7 @@ def generate_geometry_cmd(
     paths = create_task_directory(result_root, loaded.task.name, datetime.now(_SHANGHAI))
     prepare_task_inputs(loaded, paths, config_path=config)
     result = generate_geometry(loaded, paths)
-    typer.echo(str(result.paths.root.resolve()))
+    _echo_geometry_summary(result)
 
 
 @app.command("fill-pore")

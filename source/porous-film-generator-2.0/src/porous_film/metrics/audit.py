@@ -22,6 +22,7 @@ from porous_film.metrics.connectivity import (
     minimum_cross_section_index,
     periodic_percolates_x,
     pore_component_summary,
+    pore_z_connectivity_summary,
 )
 from porous_film.metrics.final_geometry import (
     FinalGeometryMeasurements,
@@ -31,6 +32,7 @@ from porous_film.metrics.local_thickness import (
     ThicknessStabilityResult,
     compare_local_thickness_coarse_fine,
 )
+from porous_film.performance import profile_stage
 from porous_film.voxel import PhaseGrid
 from porous_film.voxel.grid import voxelize_geometry
 
@@ -80,6 +82,10 @@ class AuditResult:
     minimum_cross_section_index: int
     local_thickness_stability_result: ThicknessStabilityResult
     warnings: tuple[str, ...]
+    through_pore_domain_count: int = 0
+    through_centerline_count: int = 0
+    valid_through_cross_section_count: int = 0
+    paired_orientation_result: dict[str, Any] | None = None
     formal_measurements: FinalGeometryMeasurements | None = None
     center_distance_xy_result: dict[str, Any] | None = None
     equivalent_diameter_result: DistributionComparison | None = None
@@ -111,6 +117,16 @@ def compare_samples_to_distribution(
 
 
 def audit_target_distributions(
+    config: GeneratorConfig,
+    built: BuiltGeometry,
+    center_plan: CenterSeedPlan,
+    grid: PhaseGrid,
+) -> AuditResult:
+    with profile_stage("validation"):
+        return _audit_target_distributions(config, built, center_plan, grid)
+
+
+def _audit_target_distributions(
     config: GeneratorConfig,
     built: BuiltGeometry,
     center_plan: CenterSeedPlan,
@@ -152,7 +168,9 @@ def audit_target_distributions(
         constant_relative_tolerance=_COMPACT_ETA_CONSTANT_RELATIVE_TOLERANCE,
     )
     _record_distribution_failure(warnings, "compact_eta", compact_eta_result)
-    channel_eta_target = config.channel.eta or config.channel.aspect_ratio or config.compact.aspect_ratio
+    channel_eta_target = (
+        config.channel.eta or config.channel.aspect_ratio or config.compact.aspect_ratio
+    )
     channel_eta_samples = _channel_eta_samples(built)
     _record_missing_required_samples(
         warnings, "channel_eta", expected_channel_count, channel_eta_samples
@@ -165,7 +183,9 @@ def audit_target_distributions(
         constant_relative_tolerance=_CHANNEL_GEOMETRY_CONSTANT_RELATIVE_TOLERANCE,
     )
     _record_distribution_failure(warnings, "channel_eta", channel_eta_result)
-    tau_target = config.channel.tau or config.channel.tortuosity or {"family": "constant", "value": 1.0}
+    tau_target = (
+        config.channel.tau or config.channel.tortuosity or {"family": "constant", "value": 1.0}
+    )
     tau_samples = _channel_tau_samples(built)
     _record_missing_required_samples(warnings, "tau", expected_channel_count, tau_samples)
     tau_result = _optional_distribution_comparison(
@@ -186,7 +206,8 @@ def audit_target_distributions(
     )
     _record_distribution_failure(warnings, "roughness", roughness_result)
 
-    unit_volume_summary = _unit_volume_summary(built, grid)
+    unit_occupancy_masks = _unit_occupancy_masks(built, grid)
+    unit_volume_summary = _unit_volume_summary(built, grid, unit_occupancy_masks)
     compact_relative_volume_samples = np.asarray(
         unit_volume_summary["compact"]["normalized_relative_volumes"],
         dtype=float,
@@ -229,7 +250,9 @@ def audit_target_distributions(
         "channel_relative_volume",
         channel_relative_volume_result,
     )
-    realized_mean_volume_ratio = unit_volume_summary["realized_channel_to_compact_mean_volume_ratio"]
+    realized_mean_volume_ratio = unit_volume_summary[
+        "realized_channel_to_compact_mean_volume_ratio"
+    ]
     mean_volume_ratio_relative_error = _mean_volume_ratio_relative_error(
         realized_mean_volume_ratio,
         config.pores.channel_to_compact_mean_volume_ratio,
@@ -291,7 +314,12 @@ def audit_target_distributions(
     )
 
     channel_fraction_error = _channel_fraction_error(config, built)
-    overlap_fraction = _overlap_fraction(built, grid, warnings)
+    overlap_fraction = _overlap_fraction(
+        built,
+        grid,
+        warnings,
+        unit_occupancy_masks,
+    )
     connected_pore_domains, largest_pore_fraction = pore_component_summary(pore_mask)
     x_open, y_open, z_lower, z_upper = _surface_openings(pore_mask)
     minimum_fraction = minimum_cross_section_fraction(semiconductor_mask)
@@ -309,7 +337,9 @@ def audit_target_distributions(
             warnings.append("semiconductor matrix does not percolate along periodic x")
             constraints_passed = False
         if minimum_fraction < config.matrix_constraints.minimum_cross_section_fraction:
-            warnings.append("minimum semiconductor cross-section fraction is below configured limit")
+            warnings.append(
+                "minimum semiconductor cross-section fraction is below configured limit"
+            )
             constraints_passed = False
         if overlap_fraction > config.matrix_constraints.maximum_overlap_fraction:
             warnings.append("pore overlap fraction is above configured limit")
@@ -318,7 +348,12 @@ def audit_target_distributions(
     rdf_result = _rdf_result(config, built, center_plan)
     if rdf_result["weighted_loss"] > _RDF_LOSS_LIMIT:
         warnings.append("rdf weighted loss exceeds configured audit limit")
-    local_thickness_stability_result = _local_thickness_stability_result(config, built, warnings)
+    local_thickness_stability_result = _local_thickness_stability_result(
+        config,
+        built,
+        warnings,
+        fine_grid=grid,
+    )
     _record_primary_gate_warnings(
         warnings,
         scalar_errors=scalar_errors,
@@ -379,11 +414,10 @@ def _audit_final_geometry_targets(
 ) -> AuditResult:
     warnings: list[str] = []
     measurements = measure_final_geometry(grid, config.measurement)
-    through_ids = {
-        track.track_id for track in measurements.centerlines if track.is_through
-    }
+    through_ids = {track.track_id for track in measurements.centerlines if track.is_through}
     distribution_results: dict[str, DistributionComparison] = {}
     shape = config.formal_targets.shape
+    evaluate_through_targets = config.pore_constraints.z_connectivity == "all_components"
 
     equivalent_diameter_samples = np.asarray(
         [
@@ -395,12 +429,16 @@ def _audit_final_geometry_targets(
         ],
         dtype=float,
     )
-    equivalent_diameter_result = _formal_distribution_result(
-        equivalent_diameter_samples,
-        shape.equivalent_diameter_A,
-        distribution_results,
-        "equivalent_diameter",
-        warnings,
+    equivalent_diameter_result = (
+        _formal_distribution_result(
+            equivalent_diameter_samples,
+            shape.equivalent_diameter_A,
+            distribution_results,
+            "equivalent_diameter",
+            warnings,
+        )
+        if evaluate_through_targets
+        else None
     )
 
     theta_xz_samples = np.asarray(
@@ -425,19 +463,66 @@ def _audit_final_geometry_targets(
     )
     theta_xz_target = _paired_orientation_marginal(shape.orientation, "theta_xz_deg")
     theta_xy_target = _paired_orientation_marginal(shape.orientation, "theta_xy_deg")
-    theta_xz_result = _formal_distribution_result(
-        theta_xz_samples,
-        theta_xz_target,
-        distribution_results,
-        "theta_xz",
-        warnings,
+    theta_xz_result = (
+        _formal_distribution_result(
+            theta_xz_samples,
+            theta_xz_target,
+            distribution_results,
+            "theta_xz",
+            warnings,
+        )
+        if evaluate_through_targets
+        else None
     )
-    theta_xy_result = _formal_distribution_result(
-        theta_xy_samples,
-        theta_xy_target,
+    theta_xy_result = (
+        _formal_distribution_result(
+            theta_xy_samples,
+            theta_xy_target,
+            distribution_results,
+            "theta_xy",
+            warnings,
+        )
+        if evaluate_through_targets
+        else None
+    )
+    paired_orientation_samples = np.asarray(
+        [
+            [float(value.theta_xz_deg), float(value.theta_xy_deg)]
+            for value in measurements.projected_orientations
+            if value.track_id in through_ids
+            and value.theta_xz_identifiable
+            and value.theta_xy_identifiable
+            and value.theta_xz_deg is not None
+            and value.theta_xy_deg is not None
+        ],
+        dtype=float,
+    ).reshape((-1, 2))
+    paired_orientation_result = (
+        _compare_paired_orientation_pairs(
+            paired_orientation_samples,
+            shape.orientation,
+        )
+        if evaluate_through_targets
+        else None
+    )
+    if paired_orientation_result is not None and not paired_orientation_result["passed"]:
+        warnings.append("paired orientation joint distribution comparison exceeds audit limits")
+
+    compact_eta_samples = np.asarray(
+        [
+            float(value.eta)
+            for value in measurements.compact_geometries
+            if value.valid and value.eta is not None
+        ],
+        dtype=float,
+    )
+    compact_eta_result = _formal_distribution_result(
+        compact_eta_samples,
+        shape.compact_aspect_ratio,
         distribution_results,
-        "theta_xy",
+        "compact_eta",
         warnings,
+        constant_relative_tolerance=_COMPACT_ETA_CONSTANT_RELATIVE_TOLERANCE,
     )
 
     channel_eta_samples = np.asarray(
@@ -452,27 +537,33 @@ def _audit_final_geometry_targets(
         [
             float(value.tortuosity)
             for value in measurements.channel_geometries
-            if value.track_id in through_ids
-            and value.valid
-            and value.tortuosity is not None
+            if value.track_id in through_ids and value.valid and value.tortuosity is not None
         ],
         dtype=float,
     )
-    channel_eta_result = _formal_distribution_result(
-        channel_eta_samples,
-        shape.channel_aspect_ratio,
-        distribution_results,
-        "channel_eta",
-        warnings,
-        constant_relative_tolerance=_CHANNEL_GEOMETRY_CONSTANT_RELATIVE_TOLERANCE,
+    channel_eta_result = (
+        _formal_distribution_result(
+            channel_eta_samples,
+            shape.channel_aspect_ratio,
+            distribution_results,
+            "channel_eta",
+            warnings,
+            constant_relative_tolerance=_CHANNEL_GEOMETRY_CONSTANT_RELATIVE_TOLERANCE,
+        )
+        if evaluate_through_targets
+        else None
     )
-    tau_result = _formal_distribution_result(
-        channel_tau_samples,
-        shape.channel_tortuosity,
-        distribution_results,
-        "channel_tau",
-        warnings,
-        constant_relative_tolerance=_CHANNEL_GEOMETRY_CONSTANT_RELATIVE_TOLERANCE,
+    tau_result = (
+        _formal_distribution_result(
+            channel_tau_samples,
+            shape.channel_tortuosity,
+            distribution_results,
+            "channel_tau",
+            warnings,
+            constant_relative_tolerance=_CHANNEL_GEOMETRY_CONSTANT_RELATIVE_TOLERANCE,
+        )
+        if evaluate_through_targets
+        else None
     )
 
     curvature_samples = np.asarray(
@@ -486,16 +577,28 @@ def _audit_final_geometry_targets(
         ],
         dtype=float,
     )
-    curvature_result = _formal_distribution_result(
-        curvature_samples,
-        shape.curvature_fluctuation,
-        distribution_results,
-        "curvature_fluctuation",
-        warnings,
+    curvature_result = (
+        _formal_distribution_result(
+            curvature_samples,
+            shape.curvature_fluctuation,
+            distribution_results,
+            "curvature_fluctuation",
+            warnings,
+        )
+        if evaluate_through_targets
+        else None
     )
 
     center_distance_result = _final_center_distance_result(config, measurements)
-    if not center_distance_result["passed"]:
+    center_distance_evaluated = bool(
+        evaluate_through_targets
+        and config.formal_targets.position_quantity.center_distance_xy is not None
+    )
+    center_distance_result["evaluated"] = center_distance_evaluated
+    if not center_distance_evaluated:
+        center_distance_result["passed"] = None
+        center_distance_result["weighted_loss"] = None
+    elif not center_distance_result["passed"]:
         warnings.append("center_distance_xy comparison exceeds audit limit")
 
     pore_mask = np.asarray(grid.pore_mask, dtype=bool)
@@ -509,8 +612,15 @@ def _audit_final_geometry_targets(
         "generation_seed_count_absolute": abs(float(len(built.units) - config.seed_count)),
     }
 
-    overlap_fraction = _overlap_fraction(built, grid, warnings)
+    unit_occupancy_masks = _unit_occupancy_masks(built, grid)
+    overlap_fraction = _overlap_fraction(
+        built,
+        grid,
+        warnings,
+        unit_occupancy_masks,
+    )
     connected_pore_domains, largest_pore_fraction = pore_component_summary(pore_mask)
+    z_connectivity = pore_z_connectivity_summary(pore_mask)
     x_open, y_open, z_lower, z_upper = _surface_openings(pore_mask)
     minimum_fraction = minimum_cross_section_fraction(semiconductor_mask)
     minimum_index = minimum_cross_section_index(semiconductor_mask)
@@ -526,33 +636,73 @@ def _audit_final_geometry_targets(
             warnings.append("semiconductor matrix does not percolate along periodic x")
             constraints_passed = False
         if minimum_fraction < config.matrix_constraints.minimum_cross_section_fraction:
-            warnings.append("minimum semiconductor cross-section fraction is below configured limit")
+            warnings.append(
+                "minimum semiconductor cross-section fraction is below configured limit"
+            )
             constraints_passed = False
+        if overlap_fraction > config.matrix_constraints.maximum_overlap_fraction:
+            warnings.append("pore overlap fraction is above configured limit")
+            constraints_passed = False
+
+    through_centerline_count = int(measurements.through_centerline_count)
+    valid_through_cross_section_count = int(equivalent_diameter_samples.size)
+    if (
+        config.pore_constraints.z_connectivity == "all_components"
+        and not z_connectivity.all_components_through
+    ):
+        warnings.append("not all pore components connect both finite z surfaces")
+        constraints_passed = False
+    if through_centerline_count < config.pore_constraints.minimum_through_centerlines:
+        warnings.append("minimum through centerlines requirement is not met")
+        constraints_passed = False
+    if valid_through_cross_section_count < config.pore_constraints.minimum_valid_cross_sections:
+        warnings.append("minimum valid cross-sections requirement is not met")
+        constraints_passed = False
 
     porosity_ok = abs(porosity_error) <= _porosity_tolerance(grid)
     if not porosity_ok:
         warnings.append("porosity scalar error exceeds voxel-resolution audit tolerance")
-    local_thickness_stability_result = _local_thickness_stability_result(config, built, warnings)
-    required_results = [
-        equivalent_diameter_result,
-        theta_xz_result,
-        theta_xy_result,
-        channel_eta_result,
-        tau_result,
-        curvature_result,
-    ]
-    distributions_passed = all(
-        result is not None and result.passed for result in required_results
+    local_thickness_stability_result = _local_thickness_stability_result(
+        config,
+        built,
+        warnings,
+        fine_grid=grid,
     )
+    required_results = []
+    if evaluate_through_targets:
+        required_results.extend(
+            result
+            for target, result in (
+                (shape.equivalent_diameter_A, equivalent_diameter_result),
+                (shape.orientation, theta_xz_result),
+                (shape.orientation, theta_xy_result),
+                (shape.channel_aspect_ratio, channel_eta_result),
+                (shape.channel_tortuosity, tau_result),
+                (shape.curvature_fluctuation, curvature_result),
+            )
+            if target is not None
+        )
+    if shape.compact_aspect_ratio is not None:
+        required_results.append(compact_eta_result)
+    distributions_passed = all(result is not None and result.passed for result in required_results)
+    center_distance_required = bool(
+        evaluate_through_targets
+        and config.formal_targets.position_quantity.center_distance_xy is not None
+    )
+    paired_orientation_required = bool(evaluate_through_targets and shape.orientation is not None)
     formal_passed = (
         porosity_ok
-        and center_distance_result["passed"]
+        and (not center_distance_required or bool(center_distance_result["passed"]))
         and distributions_passed
+        and (
+            not paired_orientation_required
+            or (paired_orientation_result is not None and bool(paired_orientation_result["passed"]))
+        )
         and constraints_passed
         and local_thickness_stability_result.passed
     )
 
-    unit_volume_summary = _unit_volume_summary(built, grid)
+    unit_volume_summary = _unit_volume_summary(built, grid, unit_occupancy_masks)
     realized_mean_volume_ratio = unit_volume_summary[
         "realized_channel_to_compact_mean_volume_ratio"
     ]
@@ -562,7 +712,7 @@ def _audit_final_geometry_targets(
         distribution_results=distribution_results,
         rdf_result=center_distance_result,
         theta_result=None,
-        compact_eta_result=None,
+        compact_eta_result=compact_eta_result,
         channel_eta_result=channel_eta_result,
         compact_relative_volume_result=None,
         channel_relative_volume_result=None,
@@ -587,6 +737,10 @@ def _audit_final_geometry_targets(
         minimum_cross_section_index=minimum_index,
         local_thickness_stability_result=local_thickness_stability_result,
         warnings=tuple(warnings),
+        through_pore_domain_count=z_connectivity.through_component_count,
+        through_centerline_count=through_centerline_count,
+        valid_through_cross_section_count=valid_through_cross_section_count,
+        paired_orientation_result=paired_orientation_result,
         formal_measurements=measurements,
         center_distance_xy_result=center_distance_result,
         equivalent_diameter_result=equivalent_diameter_result,
@@ -632,6 +786,65 @@ def _paired_orientation_marginal(
         distribution = getattr(component, field_name).model_dump(exclude_none=True)
         components.append({"weight": float(component.weight), **distribution})
     return {"family": "mixture", "components": components}
+
+
+def _compare_paired_orientation_pairs(
+    samples: np.ndarray,
+    target: Any | None,
+) -> dict[str, Any] | None:
+    if target is None:
+        return None
+    values = np.asarray(samples, dtype=float).reshape((-1, 2))
+    target_dict = _as_distribution_dict(target)
+    components = target_dict.get("components") or ()
+    if values.size == 0 or not components:
+        return {
+            "passed": False,
+            "sample_count": int(values.shape[0]),
+            "unassigned_pair_count": int(values.shape[0]),
+            "component_count_errors": {},
+        }
+
+    scores = np.full((values.shape[0], len(components)), -np.inf, dtype=float)
+    weights = np.asarray([float(component["weight"]) for component in components])
+    for component_index, component in enumerate(components):
+        score = np.full(values.shape[0], np.log(max(weights[component_index], 1.0e-300)))
+        supported = np.ones(values.shape[0], dtype=bool)
+        for value_index, field_name in enumerate(("theta_xz_deg", "theta_xy_deg")):
+            distribution = _as_distribution_dict(component[field_name])
+            lower = float(distribution.get("lower", distribution.get("minimum", 0.0)))
+            upper = float(distribution.get("upper", distribution.get("maximum", 90.0)))
+            in_support = (values[:, value_index] >= lower) & (values[:, value_index] <= upper)
+            supported &= in_support
+            normalized = np.clip(
+                (values[:, value_index] - lower) / max(upper - lower, 1.0e-12),
+                1.0e-12,
+                1.0 - 1.0e-12,
+            )
+            score += stats.beta.logpdf(
+                normalized,
+                a=_required_float(distribution, "alpha"),
+                b=_required_float(distribution, "beta"),
+            ) - np.log(max(upper - lower, 1.0e-12))
+        scores[supported, component_index] = score[supported]
+
+    assigned = np.argmax(scores, axis=1)
+    unassigned = ~np.any(np.isfinite(scores), axis=1)
+    actual_counts = np.bincount(assigned[~unassigned], minlength=len(components))
+    expected_counts = allocate_largest_remainder(weights, values.shape[0])
+    tolerance = _mixture_weight_tolerance(values.shape[0])
+    errors = {
+        f"component_{index}": float((actual - expected) / max(values.shape[0], 1))
+        for index, (actual, expected) in enumerate(zip(actual_counts, expected_counts, strict=True))
+    }
+    return {
+        "passed": bool(
+            not np.any(unassigned) and all(abs(error) <= tolerance for error in errors.values())
+        ),
+        "sample_count": int(values.shape[0]),
+        "unassigned_pair_count": int(np.count_nonzero(unassigned)),
+        "component_count_errors": errors,
+    }
 
 
 def _final_center_distance_result(
@@ -710,20 +923,12 @@ def _optional_distribution_comparison(
         ks_limit=_DISTRIBUTION_KS_LIMIT,
         normalized_wasserstein_limit=_DISTRIBUTION_WASSERSTEIN_LIMIT,
     )
-    if (
-        constant_relative_tolerance is not None
-        and target_dict.get("family") == "constant"
-    ):
+    if constant_relative_tolerance is not None and target_dict.get("family") == "constant":
         target_value = float(target_dict["value"])
-        relative_errors = np.abs(sample_values - target_value) / max(
-            abs(target_value), 1.0e-12
-        )
+        relative_errors = np.abs(sample_values - target_value) / max(abs(target_value), 1.0e-12)
         if np.all(relative_errors <= constant_relative_tolerance):
             comparison = DistributionComparison(
-                passed=(
-                    comparison.normalized_wasserstein
-                    <= _DISTRIBUTION_WASSERSTEIN_LIMIT
-                ),
+                passed=(comparison.normalized_wasserstein <= _DISTRIBUTION_WASSERSTEIN_LIMIT),
                 ks=0.0,
                 normalized_wasserstein=comparison.normalized_wasserstein,
             )
@@ -849,7 +1054,9 @@ def _mixture_sample_count(
     return mixture_sample_counts.get(name, fallback_count)
 
 
-def _scalar_errors(config: GeneratorConfig, grid: PhaseGrid, built: BuiltGeometry) -> dict[str, float]:
+def _scalar_errors(
+    config: GeneratorConfig, grid: PhaseGrid, built: BuiltGeometry
+) -> dict[str, float]:
     target_porosity = float(config.pores.target_porosity)
     seed_target = float(config.seed_count)
     seed_actual = float(len(built.units))
@@ -865,9 +1072,18 @@ def _scalar_errors(config: GeneratorConfig, grid: PhaseGrid, built: BuiltGeometr
     }
 
 
-def _unit_volume_summary(built: BuiltGeometry, grid: PhaseGrid) -> dict[str, Any]:
+def _unit_volume_summary(
+    built: BuiltGeometry,
+    grid: PhaseGrid,
+    unit_occupancy_masks: tuple[np.ndarray, ...] | None = None,
+) -> dict[str, Any]:
+    occupancy_masks = (
+        _unit_occupancy_masks(built, grid) if unit_occupancy_masks is None else unit_occupancy_masks
+    )
+    if len(occupancy_masks) != len(built.units):
+        raise ValueError("unit occupancy mask count must match generated unit count")
     records: list[dict[str, Any]] = []
-    for unit in built.units:
+    for unit, occupancy_mask in zip(built.units, occupancy_masks, strict=True):
         kind = "compact" if isinstance(unit, CompactUnit) else "channel"
         records.append(
             {
@@ -877,7 +1093,12 @@ def _unit_volume_summary(built: BuiltGeometry, grid: PhaseGrid) -> dict[str, Any
                 if getattr(unit, "latent_target_volume_A3", None) is None
                 else float(unit.latent_target_volume_A3),
                 "realized_volume_A3": _realized_continuous_volume_A3(unit),
-                "realized_clipped_volume_A3": _realized_clipped_volume_A3(unit, built, grid),
+                "realized_clipped_volume_A3": _realized_clipped_volume_A3(
+                    unit,
+                    built,
+                    grid,
+                    occupancy_mask,
+                ),
             }
         )
 
@@ -897,19 +1118,11 @@ def _unit_volume_summary(built: BuiltGeometry, grid: PhaseGrid) -> dict[str, Any
             record["realized_normalized_relative_volume"] = float(normalized_value)
 
     compact_volumes = np.asarray(
-        [
-            record["realized_volume_A3"]
-            for record in records
-            if record["kind"] == "compact"
-        ],
+        [record["realized_volume_A3"] for record in records if record["kind"] == "compact"],
         dtype=float,
     )
     channel_volumes = np.asarray(
-        [
-            record["realized_volume_A3"]
-            for record in records
-            if record["kind"] == "channel"
-        ],
+        [record["realized_volume_A3"] for record in records if record["kind"] == "channel"],
         dtype=float,
     )
     compact_summary = _volume_kind_summary(compact_volumes, records, "compact")
@@ -918,9 +1131,7 @@ def _unit_volume_summary(built: BuiltGeometry, grid: PhaseGrid) -> dict[str, Any
     channel_mean = channel_summary["mean_volume_A3"]
     ratio = (
         float(channel_mean / compact_mean)
-        if compact_mean is not None
-        and channel_mean is not None
-        and compact_mean > 0.0
+        if compact_mean is not None and channel_mean is not None and compact_mean > 0.0
         else None
     )
     return {
@@ -956,9 +1167,7 @@ def _realized_continuous_volume_A3(
         if unit.is_multilobe:
             profile = CompactShapeProfile(
                 shape_seed=int(unit.shape_seed if unit.shape_seed is not None else 0),
-                lobe_centers_local_A=np.asarray(
-                    unit.lobe_centers_local_A, dtype=float
-                ),
+                lobe_centers_local_A=np.asarray(unit.lobe_centers_local_A, dtype=float),
                 lobe_radii_A=np.asarray(unit.lobe_radii_A, dtype=float),
                 smooth_length_A=float(unit.smooth_length_A),
                 envelope_radii_A=np.asarray(unit.radii_A, dtype=float),
@@ -972,9 +1181,7 @@ def _realized_continuous_volume_A3(
     if unit.is_variable_radius:
         profile = VariableRadiusChannelProfile(
             shape_seed=int(unit.shape_seed if unit.shape_seed is not None else 0),
-            control_points_local_A=np.asarray(
-                unit.control_points_unwrapped_A, dtype=float
-            ),
+            control_points_local_A=np.asarray(unit.control_points_unwrapped_A, dtype=float),
             radius_profile_s=np.asarray(unit.radius_profile_s, dtype=float),
             radius_profile_A=np.asarray(unit.radius_profile_A, dtype=float),
             equivalent_radius_A=float(unit.cross_radius_A),
@@ -993,7 +1200,13 @@ def _realized_clipped_volume_A3(
     unit: CompactUnit | ChannelUnit,
     built: BuiltGeometry,
     grid: PhaseGrid,
+    occupancy_mask: np.ndarray | None = None,
 ) -> float:
+    if occupancy_mask is not None:
+        mask = np.asarray(occupancy_mask, dtype=bool)
+        if mask.shape != grid.pore_mask.shape:
+            raise ValueError("unit occupancy mask shape must match final phase grid")
+        return float(np.count_nonzero(mask) * grid.spacing_A**3)
     shape = grid.pore_mask.shape
     total = int(np.prod(shape))
     flat_indices = np.arange(total, dtype=np.int64)
@@ -1017,7 +1230,7 @@ def _mean_volume_ratio_relative_error(
 
 def _theta_samples(config: GeneratorConfig, built: BuiltGeometry) -> np.ndarray:
     values = []
-    near_spherical_tolerance = float(config.audit.orientation_aspect_ratio_tolerance)
+    near_spherical_tolerance = float(config.measurement.orientation_aspect_ratio_tolerance)
     for unit in built.units:
         if isinstance(unit, CompactUnit):
             radii = np.asarray(unit.radii_A, dtype=float)
@@ -1059,8 +1272,12 @@ def _roughness_samples_and_target(
     config: GeneratorConfig,
     built: BuiltGeometry,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    compact_values = [float(unit.roughness) for unit in built.units if isinstance(unit, CompactUnit)]
-    channel_values = [float(unit.roughness) for unit in built.units if isinstance(unit, ChannelUnit)]
+    compact_values = [
+        float(unit.roughness) for unit in built.units if isinstance(unit, CompactUnit)
+    ]
+    channel_values = [
+        float(unit.roughness) for unit in built.units if isinstance(unit, ChannelUnit)
+    ]
     values = np.asarray(compact_values + channel_values, dtype=float)
     compact_target = _as_distribution_dict(config.compact.roughness)
     channel_target = _as_distribution_dict(config.channel.roughness)
@@ -1090,25 +1307,53 @@ def _channel_fraction_error(config: GeneratorConfig, built: BuiltGeometry) -> fl
     return float(actual - config.pores.channel_fraction_by_count)
 
 
-def _overlap_fraction(built: BuiltGeometry, grid: PhaseGrid, warnings: list[str]) -> float:
+def _unit_occupancy_masks(
+    built: BuiltGeometry,
+    grid: PhaseGrid,
+) -> tuple[np.ndarray, ...]:
+    if not built.units:
+        return ()
+    if np.allclose(grid.origin_A, 0.0, rtol=0.0, atol=0.0):
+        return tuple(
+            voxelize_geometry(
+                PoreGeometry([unit], built.geometry.target_box_A),
+                built.geometry.target_box_A,
+                grid.spacing_A,
+            ).pore_mask
+            for unit in built.units
+        )
+
+    shape = grid.pore_mask.shape
+    flat_indices = np.arange(grid.pore_mask.size, dtype=np.int64)
+    points = _grid_points(flat_indices, shape, grid.spacing_A, grid.origin_A)
+    return tuple(
+        (PoreGeometry([unit], built.geometry.target_box_A).sdf(points) < 0.0).reshape(shape)
+        for unit in built.units
+    )
+
+
+def _overlap_fraction(
+    built: BuiltGeometry,
+    grid: PhaseGrid,
+    warnings: list[str],
+    unit_occupancy_masks: tuple[np.ndarray, ...] | None = None,
+) -> float:
     if len(built.units) < 2:
         return 0.0
     pore_voxels = int(np.count_nonzero(grid.pore_mask))
     if pore_voxels == 0:
         return 0.0
 
-    shape = grid.pore_mask.shape
-    total = int(np.prod(shape))
-    coverage = np.zeros(total, dtype=np.uint16)
-    flat_indices = np.arange(total, dtype=np.int64)
-    for unit in built.units:
-        unit_geometry = PoreGeometry([unit], built.geometry.target_box_A)
-        for start in range(0, total, _OVERLAP_CHUNK_SIZE):
-            stop = min(start + _OVERLAP_CHUNK_SIZE, total)
-            points = _grid_points(flat_indices[start:stop], shape, grid.spacing_A, grid.origin_A)
-            coverage[start:stop] += (unit_geometry.sdf(points) < 0.0).astype(np.uint16)
+    occupancy_masks = (
+        _unit_occupancy_masks(built, grid) if unit_occupancy_masks is None else unit_occupancy_masks
+    )
+    if len(occupancy_masks) != len(built.units):
+        raise ValueError("unit occupancy mask count must match generated unit count")
+    coverage = np.zeros(grid.pore_mask.shape, dtype=np.uint16)
+    for occupancy_mask in occupancy_masks:
+        coverage += np.asarray(occupancy_mask, dtype=np.uint16)
 
-    overlap_voxels = int(np.count_nonzero((coverage > 1) & grid.pore_mask.ravel()))
+    overlap_voxels = int(np.count_nonzero((coverage > 1) & grid.pore_mask))
     if overlap_voxels and np.max(coverage) == np.iinfo(coverage.dtype).max:
         warnings.append("overlap coverage counter saturated")
     return float(overlap_voxels / pore_voxels)
@@ -1170,6 +1415,8 @@ def _local_thickness_stability_result(
     config: GeneratorConfig,
     built: BuiltGeometry,
     warnings: list[str],
+    *,
+    fine_grid: PhaseGrid | None = None,
 ) -> ThicknessStabilityResult:
     if not config.audit.enabled:
         return ThicknessStabilityResult(True, 0.0, 0.0, 0.0, 0.0, None)
@@ -1183,11 +1430,14 @@ def _local_thickness_stability_result(
             built.geometry.target_box_A,
             coarse_spacing,
         )
-        fine_grid = voxelize_geometry(
-            built.geometry,
-            built.geometry.target_box_A,
-            fine_spacing,
-        )
+        if fine_grid is None:
+            fine_grid = voxelize_geometry(
+                built.geometry,
+                built.geometry.target_box_A,
+                fine_spacing,
+            )
+        elif not np.isclose(fine_grid.spacing_A, fine_spacing):
+            raise ValueError("supplied fine grid spacing does not match audit.fine_spacing_A")
         result = compare_local_thickness_coarse_fine(
             coarse_grid.pore_mask,
             fine_grid.pore_mask,
@@ -1271,7 +1521,9 @@ def _record_mixture_errors(
     assigned_counts = _assign_mixture_components(samples, components)
     sample_counts[name] = int(samples.size)
     output[name] = {
-        f"component_{index}": float((assigned_counts[index] - expected_counts[index]) / samples.size)
+        f"component_{index}": float(
+            (assigned_counts[index] - expected_counts[index]) / samples.size
+        )
         for index in range(len(components))
     }
 
@@ -1283,7 +1535,9 @@ def _assign_mixture_components(samples: np.ndarray, components: list[dict[str, A
             if component.get("family") == "constant"
             else float(np.median(_target_quantile_samples(component_without_weight, 129)))
             for component in components
-            for component_without_weight in [{key: value for key, value in component.items() if key != "weight"}]
+            for component_without_weight in [
+                {key: value for key, value in component.items() if key != "weight"}
+            ]
         ],
         dtype=float,
     )
@@ -1312,7 +1566,9 @@ def _target_quantile_samples(target: dict[str, Any], count: int) -> np.ndarray:
         values = []
         for component, component_count in zip(components, counts, strict=True):
             if component_count:
-                component_target = {key: value for key, value in component.items() if key != "weight"}
+                component_target = {
+                    key: value for key, value in component.items() if key != "weight"
+                }
                 values.append(_target_quantile_samples(component_target, int(component_count)))
         return np.sort(np.concatenate(values)) if values else np.array([], dtype=float)
     return _distribution_ppf(target, quantiles)

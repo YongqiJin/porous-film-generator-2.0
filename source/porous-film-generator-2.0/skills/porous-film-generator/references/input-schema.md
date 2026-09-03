@@ -61,6 +61,32 @@ generation_controls contains variables used to construct candidates:
 These values are diagnostics and internal search controls. They are not accepted as evidence that a
 final structure matches a formal target.
 
+## Pore topology and sample constraints
+
+`pore_constraints` contains final-pore hard gates:
+
+- `z_connectivity` is `unrestricted` by default. `all_components` requires every final pore
+  component, after periodic x/y merging, to touch both finite z surfaces.
+- `minimum_through_centerlines` is the minimum number of reconstructed centerline tracks that touch
+  the first and last sampled z slices.
+- `minimum_valid_cross_sections` is the minimum number of valid normal sections belonging to those
+  through tracks.
+
+When `z_connectivity` is `unrestricted`, formal comparisons that require through tracks are marked
+`N/A` (not evaluated) and cannot fail validation: `g_xy`, local equivalent diameter, paired orientation,
+channel eta/tau, and curvature fluctuation. Porosity, compact eta, matrix constraints, and any
+explicit nonzero minimum counts remain active. The corresponding formal-target fields are optional
+in this mode. If retained for compatibility, they may guide candidate generation but are still
+reported as `N/A`; omit them when no such generation preference is intended.
+
+In `all_components` mode, generation actively translates every channel across both z surfaces and
+the porosity scale solver preserves that span. This mode requires
+`generation_controls.channel_fraction_by_count: 1`, at least one planned channel, and no
+`formal_targets.shape.compact_aspect_ratio`. A channel whose configured diameter, orientation,
+eta, and tau cannot span the film is rejected as infeasible instead of silently relaxing a target.
+The requested minimum centerline count is preflighted against the largest-remainder planned channel
+count; a positive valid-section minimum also requires at least one planned channel.
+
 ## Measurement contract
 
 measurement fixes the algorithms' physical resolution:
@@ -70,11 +96,20 @@ measurement fixes the algorithms' physical resolution:
 - center_tracking_max_displacement_A;
 - center_distance_bin_width_A and optional center_distance_max_A;
 - center_distance_reference_samples;
-- centerline_sample_spacing_A and cross_section_spacing_A;
+- centerline_sample_spacing_A: physical arc-length spacing used to resample each smoothed
+  centerline before tangent, arc-length, eta/tau, and normal-section measurements;
+- cross_section_spacing_A: physical arc-length spacing between normal-section measurements;
 - boundary_resample_spacing_A;
 - curvature_smoothing_length_A;
 - branch_exclusion_length_A and surface_exclusion_length_A;
-- orientation_projection_min_fraction.
+- orientation_projection_min_fraction;
+- orientation_aspect_ratio_tolerance: final channels with eta less than or equal to
+  `1 + tolerance` have no identifiable major-axis orientation and are excluded from the paired
+  orientation samples.
+
+`orientation_aspect_ratio_tolerance` belongs to `measurement`, so the main audit and independent
+validator use the same final-phase rule. The former `audit` location remains input-compatible and
+is normalized to `measurement` when a configuration is loaded.
 
 These are fixed for a study and are not Bayesian optimization variables.
 
@@ -134,6 +169,7 @@ The numerical values are syntax examples, not approved physical parameters.
 ## Other top-level groups
 
 - matrix_constraints: final semiconductor connectivity and cross-section gates.
+- pore_constraints: final pore z topology and minimum usable-sample gates.
 - audit: candidate count, coarse/fine voxel resolution, memory cap, and comparison settings.
 - output: output behavior and plot requests.
 - optimization: replicate seed panel for external uncertainty estimation.

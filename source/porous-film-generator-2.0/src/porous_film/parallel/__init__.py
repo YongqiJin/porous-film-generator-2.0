@@ -6,6 +6,7 @@ from porous_film.parallel.candidates import (
     GeometryAcceptanceError,
     build_candidate_tasks,
     evaluate_candidate_task,
+    evaluate_candidate_task_with_artifacts,
     replay_candidate,
     select_candidate,
 )
@@ -59,6 +60,7 @@ __all__ = [
     "estimate_generation_memory_bytes",
     "estimate_worker_memory_bytes",
     "evaluate_candidate_task",
+    "evaluate_candidate_task_with_artifacts",
     "execute_seed_task",
     "initialize_worker",
     "numeric_thread_limits",

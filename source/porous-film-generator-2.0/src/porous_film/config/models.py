@@ -7,6 +7,8 @@ import numpy as np
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from porous_film.distributions import allocate_largest_remainder
+
 TABULATED_FIELDS = frozenset(
     {
         "table",
@@ -17,6 +19,19 @@ TABULATED_FIELDS = frozenset(
         "probabilities",
         "histogram",
         "bins",
+    }
+)
+SUPPORTED_DISTRIBUTION_FAMILIES = frozenset(
+    {
+        "constant",
+        "lognormal",
+        "gamma",
+        "weibull",
+        "weibull_min",
+        "truncated_normal",
+        "truncnorm",
+        "beta",
+        "mixture",
     }
 )
 
@@ -139,12 +154,7 @@ class MixtureComponent(StrictModel):
 
     @model_validator(mode="after")
     def validate_mixture(self) -> Self:
-        if self.family == "mixture":
-            if not self.components:
-                raise ValueError("mixture distribution requires at least one component")
-            weight_sum = sum(component.weight for component in self.components)
-            if abs(weight_sum - 1.0) > 1e-9:
-                raise ValueError("mixture weights must sum to 1")
+        _validate_distribution_parameters(self)
         return self
 
     def as_distribution_dict(self) -> dict[str, Any]:
@@ -184,17 +194,133 @@ class DistributionSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_distribution(self) -> Self:
-        if self.family == "mixture":
-            if not self.components:
-                raise ValueError("mixture distribution requires at least one component")
-            weight_sum = sum(component.weight for component in self.components)
-            if abs(weight_sum - 1.0) > 1e-9:
-                raise ValueError("mixture weights must sum to 1")
+        _validate_distribution_parameters(self)
         return self
 
     @staticmethod
     def constant(value: float) -> DistributionSpec:
         return DistributionSpec(family="constant", value=value)
+
+
+def _validate_distribution_parameters(spec: DistributionSpec | MixtureComponent) -> None:
+    family = spec.family
+    if family not in SUPPORTED_DISTRIBUTION_FAMILIES:
+        raise ValueError(f"unsupported distribution family: {family}")
+
+    numeric_fields = (
+        "value",
+        "alpha",
+        "beta",
+        "mean",
+        "mu",
+        "sigma",
+        "s",
+        "scale",
+        "loc",
+        "shape",
+        "k",
+        "theta",
+        "lower",
+        "upper",
+        "minimum",
+        "maximum",
+    )
+    for field_name in numeric_fields:
+        value = getattr(spec, field_name)
+        if value is not None and not np.isfinite(value):
+            raise ValueError(f"{family} distribution parameter {field_name} must be finite")
+
+    allowed_parameters = {
+        "constant": {"value"},
+        "lognormal": {"sigma", "s", "scale", "mean", "mu", "loc"},
+        "gamma": {"alpha", "shape", "k", "scale", "theta", "loc"},
+        "weibull": {"shape", "k", "alpha", "scale", "loc"},
+        "weibull_min": {"shape", "k", "alpha", "scale", "loc"},
+        "truncated_normal": {"mean", "loc", "sigma", "s", "lower", "upper"},
+        "truncnorm": {"mean", "loc", "sigma", "s", "lower", "upper"},
+        "beta": {"alpha", "beta", "lower", "minimum", "upper", "maximum", "scale"},
+        "mixture": set(),
+    }
+    unused = sorted(
+        field_name
+        for field_name in numeric_fields
+        if getattr(spec, field_name) is not None
+        and field_name not in allowed_parameters[family]
+    )
+    if unused:
+        raise ValueError(
+            f"{family} distribution does not use parameters: " + ", ".join(unused)
+        )
+
+    if family == "mixture":
+        if not spec.components:
+            raise ValueError("mixture distribution requires at least one component")
+        weight_sum = sum(component.weight for component in spec.components)
+        if abs(weight_sum - 1.0) > 1e-9:
+            raise ValueError("mixture weights must sum to 1")
+        return
+    if spec.components is not None:
+        raise ValueError(f"{family} distribution does not accept components")
+
+    def aliases(label: str, *names: str, required: bool = False) -> str | None:
+        present = [name for name in names if getattr(spec, name) is not None]
+        if len(present) > 1:
+            raise ValueError(f"{family} {label} aliases are mutually exclusive")
+        if required and not present:
+            raise ValueError(
+                f"{family} distribution requires one of: " + ", ".join(names)
+            )
+        return present[0] if present else None
+
+    def require_positive(field_name: str | None, label: str) -> None:
+        if field_name is not None and float(getattr(spec, field_name)) <= 0.0:
+            raise ValueError(f"{family} {label} must be positive")
+
+    if family == "constant":
+        if spec.value is None:
+            raise ValueError("constant distribution requires value")
+        return
+    if family == "lognormal":
+        sigma_name = aliases("sigma", "sigma", "s", required=True)
+        require_positive(sigma_name, "sigma")
+        aliases("log-scale", "mean", "mu")
+        require_positive("scale" if spec.scale is not None else None, "scale")
+        if spec.scale is not None and (spec.mean is not None or spec.mu is not None):
+            raise ValueError("lognormal scale and log-scale aliases are mutually exclusive")
+        return
+    if family == "gamma":
+        shape_name = aliases("shape", "alpha", "shape", "k", required=True)
+        scale_name = aliases("scale", "scale", "theta")
+        require_positive(shape_name, "shape")
+        require_positive(scale_name, "scale")
+        return
+    if family in {"weibull", "weibull_min"}:
+        shape_name = aliases("shape", "shape", "k", "alpha", required=True)
+        require_positive(shape_name, "shape")
+        require_positive("scale" if spec.scale is not None else None, "scale")
+        return
+    if family in {"truncated_normal", "truncnorm"}:
+        aliases("mean", "mean", "loc")
+        sigma_name = aliases("sigma", "sigma", "s", required=True)
+        require_positive(sigma_name, "sigma")
+        if spec.lower is None or spec.upper is None:
+            raise ValueError("truncated normal distribution requires lower and upper support")
+        if spec.upper <= spec.lower:
+            raise ValueError("truncated normal upper support must exceed lower support")
+        return
+
+    lower_name = aliases("lower support", "lower", "minimum")
+    upper_name = aliases("upper support", "upper", "maximum")
+    require_positive("alpha" if spec.alpha is not None else None, "alpha")
+    require_positive("beta" if spec.beta is not None else None, "beta")
+    if spec.alpha is None or spec.beta is None:
+        raise ValueError("beta distribution requires alpha and beta")
+    if upper_name is not None and spec.scale is not None:
+        raise ValueError("beta upper support and scale are mutually exclusive")
+    require_positive("scale" if spec.scale is not None else None, "scale")
+    lower = float(getattr(spec, lower_name)) if lower_name is not None else 0.0
+    if upper_name is not None and float(getattr(spec, upper_name)) <= lower:
+        raise ValueError("beta upper support must exceed lower support")
 
 
 def _distribution_lower_support(spec: DistributionSpec | MixtureComponent) -> float:
@@ -431,6 +557,7 @@ class MeasurementSpec(StrictModel):
     branch_exclusion_length_A: float = Field(ge=0, default=2.0)
     surface_exclusion_length_A: float = Field(ge=0, default=2.0)
     orientation_projection_min_fraction: float = Field(gt=0, lt=1, default=0.05)
+    orientation_aspect_ratio_tolerance: float = Field(ge=0, default=1.0e-6)
 
 
 class MatrixConstraintSpec(StrictModel):
@@ -439,6 +566,12 @@ class MatrixConstraintSpec(StrictModel):
     minimum_cross_section_fraction: float = Field(ge=0, le=1, default=0.0)
     maximum_overlap_fraction: float = Field(ge=0, le=1, default=0.0)
     minimum_skeleton_thickness_A: float | None = Field(default=None, gt=0)
+
+
+class PoreConstraintSpec(StrictModel):
+    z_connectivity: Literal["unrestricted", "all_components"] = "unrestricted"
+    minimum_through_centerlines: int = Field(ge=0, default=0)
+    minimum_valid_cross_sections: int = Field(ge=0, default=0)
 
 
 class PoreMaterialSpec(StrictModel):
@@ -461,7 +594,6 @@ class AuditSpec(StrictModel):
     maximum_rounds: int = Field(gt=0, default=1)
     coarse_spacing_A: float = Field(gt=0, default=2.0)
     fine_spacing_A: float = Field(gt=0, default=1.0)
-    orientation_aspect_ratio_tolerance: float = Field(ge=0, default=1.0e-6)
     interface_mixing_layer_fraction: float = Field(ge=0, le=1, default=0.0)
     available_memory_cap_bytes: int | None = Field(default=None, gt=0)
 
@@ -518,6 +650,7 @@ class GeneratorConfig(StrictModel):
     pore_material: PoreMaterialSpec | None = None
     orientation: OrientationSpec = Field(default_factory=OrientationSpec)
     channel: ChannelPoreSpec = Field(default_factory=ChannelPoreSpec)
+    pore_constraints: PoreConstraintSpec = Field(default_factory=PoreConstraintSpec)
     matrix_constraints: MatrixConstraintSpec = Field(default_factory=MatrixConstraintSpec)
     audit: AuditSpec = Field(
         default_factory=AuditSpec,
@@ -533,6 +666,26 @@ class GeneratorConfig(StrictModel):
         if not isinstance(raw, dict):
             return raw
         data = dict(raw)
+        audit_key = "audit" if "audit" in data else "geometry_audit"
+        raw_audit = data.get(audit_key)
+        if isinstance(raw_audit, dict) and "orientation_aspect_ratio_tolerance" in raw_audit:
+            audit = dict(raw_audit)
+            legacy_tolerance = audit.pop("orientation_aspect_ratio_tolerance")
+            measurement = dict(data.get("measurement") or {})
+            configured_tolerance = measurement.get("orientation_aspect_ratio_tolerance")
+            if configured_tolerance is not None and not np.isclose(
+                float(configured_tolerance),
+                float(legacy_tolerance),
+                rtol=0.0,
+                atol=0.0,
+            ):
+                raise ValueError(
+                    "orientation_aspect_ratio_tolerance is configured differently in "
+                    "measurement and audit"
+                )
+            measurement.setdefault("orientation_aspect_ratio_tolerance", legacy_tolerance)
+            data[audit_key] = audit
+            data["measurement"] = measurement
         formal = data.get("formal_targets")
         generation = data.get("generation_controls")
         is_v3_input = formal is not None
@@ -556,9 +709,7 @@ class GeneratorConfig(StrictModel):
                 {
                     "seed_number_density_A3": generation.get("seed_number_density_A3"),
                     "target_porosity": porosity,
-                    "channel_fraction_by_count": generation.get(
-                        "channel_fraction_by_count", 1.0
-                    ),
+                    "channel_fraction_by_count": generation.get("channel_fraction_by_count", 1.0),
                     "channel_to_compact_mean_volume_ratio": generation.get(
                         "channel_to_compact_mean_volume_ratio", 1.0
                     ),
@@ -650,9 +801,7 @@ class GeneratorConfig(StrictModel):
                 "generation_controls",
                 {
                     "seed_number_density_A3": pores.get("seed_number_density_A3"),
-                    "channel_fraction_by_count": pores.get(
-                        "channel_fraction_by_count", 0.0
-                    ),
+                    "channel_fraction_by_count": pores.get("channel_fraction_by_count", 0.0),
                     "channel_to_compact_mean_volume_ratio": pores.get(
                         "channel_to_compact_mean_volume_ratio", 1.0
                     ),
@@ -694,23 +843,44 @@ class GeneratorConfig(StrictModel):
     @model_validator(mode="after")
     def validate_schema_and_seed_panel(self) -> Self:
         if self.source_schema_version == 3:
-            if self.formal_targets.position_quantity.center_distance_xy is None:
-                raise ValueError("schema v3 requires center_distance_xy")
             shape = self.formal_targets.shape
-            missing = [
-                name
-                for name, value in (
-                    ("equivalent_diameter_A", shape.equivalent_diameter_A),
-                    ("orientation", shape.orientation),
-                    ("channel_aspect_ratio", shape.channel_aspect_ratio),
-                    ("channel_tortuosity", shape.channel_tortuosity),
-                    ("curvature_fluctuation", shape.curvature_fluctuation),
-                )
-                if value is None
-            ]
-            if missing:
+            _compact_count, planned_channel_count = allocate_largest_remainder(
+                [
+                    1.0 - self.generation_controls.channel_fraction_by_count,
+                    self.generation_controls.channel_fraction_by_count,
+                ],
+                self.seed_count,
+            )
+            if self.pore_constraints.z_connectivity == "all_components":
+                if not np.isclose(
+                    self.generation_controls.channel_fraction_by_count,
+                    1.0,
+                    rtol=0.0,
+                    atol=1.0e-12,
+                ):
+                    raise ValueError(
+                        "all_components z connectivity requires "
+                        "generation_controls.channel_fraction_by_count=1"
+                    )
+                if shape.compact_aspect_ratio is not None:
+                    raise ValueError(
+                        "all_components z connectivity cannot be combined with "
+                        "formal_targets.shape.compact_aspect_ratio"
+                    )
+                if planned_channel_count <= 0:
+                    raise ValueError(
+                        "all_components z connectivity requires at least one generated channel"
+                    )
+            if self.pore_constraints.minimum_through_centerlines > planned_channel_count:
                 raise ValueError(
-                    "schema v3 missing formal shape targets: " + ", ".join(missing)
+                    "minimum_through_centerlines exceeds the planned channel count"
+                )
+            if (
+                self.pore_constraints.minimum_valid_cross_sections > 0
+                and planned_channel_count <= 0
+            ):
+                raise ValueError(
+                    "minimum_valid_cross_sections requires at least one planned channel"
                 )
         if self.optimization.seed_panel is None:
             self.optimization.seed_panel = (self.task.random_seed,)

@@ -5,12 +5,15 @@ from porous_film.metrics.audit import (
     compare_samples_to_distribution,
 )
 from porous_film.metrics.connectivity import (
+    PoreZConnectivitySummary,
     minimum_cross_section_fraction,
     periodic_percolates_x,
+    pore_z_connectivity_summary,
 )
 from porous_film.metrics.final_geometry import (
     CenterlineTrack,
     ChannelGeometryMeasurement,
+    CompactGeometryMeasurement,
     CrossSectionMeasurement,
     FinalGeometryMeasurements,
     ProjectedOrientationMeasurement,
@@ -30,9 +33,11 @@ __all__ = [
     "AuditResult",
     "CenterlineTrack",
     "ChannelGeometryMeasurement",
+    "CompactGeometryMeasurement",
     "CrossSectionMeasurement",
     "DistributionComparison",
     "FinalGeometryMeasurements",
+    "PoreZConnectivitySummary",
     "ProjectedOrientationMeasurement",
     "SliceCenter",
     "SliceCenterRecord",
@@ -46,4 +51,5 @@ __all__ = [
     "measure_final_geometry",
     "minimum_cross_section_fraction",
     "periodic_percolates_x",
+    "pore_z_connectivity_summary",
 ]

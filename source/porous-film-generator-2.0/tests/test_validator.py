@@ -9,18 +9,34 @@ import h5py
 import numpy as np
 import trimesh
 import yaml
+from scipy import stats
 from scipy.interpolate import PchipInterpolator
 from typer.testing import CliRunner
 
+from porous_film.metrics import compare_samples_to_distribution
 from porous_film_validator.cli import app as validator_app
 from porous_film_validator.validate import (
+    _compare_v3_json_compacts,
+    _config_schema_version,
+    _independent_overlap_fraction,
     _PhaseData,
+    _target_compliance,
+    _v3_compare_paired_orientation_pairs,
+    _v3_distribution_target_result,
     _v3_measure_final_geometry,
+    _v3_measurement_contract,
+    _V3CompactGeometryMeasurement,
     _V3MeasurementContract,
     validate_export,
 )
 
 runner = CliRunner()
+
+
+def test_validator_uses_source_schema_version_for_translated_legacy_config() -> None:
+    assert _config_schema_version({"schema_version": 3, "source_schema_version": 2}) == 2
+    assert _config_schema_version({"schema_version": 3, "source_schema_version": 3}) == 3
+    assert _config_schema_version({"schema_version": 3}) == 3
 
 
 def test_validator_console_command_is_installed() -> None:
@@ -114,6 +130,32 @@ def test_validator_fails_when_independent_porosity_misses_target(
     assert report.status == "FAIL"
     assert "porosity" in " ".join(report.errors).lower()
     assert report.target_compliance["porosity_within_tolerance"] is False
+
+
+def test_validator_uses_same_voxel_aware_porosity_tolerance_as_main_audit() -> None:
+    errors: list[str] = []
+
+    compliance = _target_compliance(
+        {
+            "film": {"target_box_A": {"x": 2.0, "y": 2.0, "z": 2.0}},
+            "pores": {"target_porosity": 0.05},
+        },
+        {"target_box_A": [2.0, 2.0, 2.0]},
+        {
+            "target_box_A": [2.0, 2.0, 2.0],
+            "porosity": 0.125,
+            "pore_voxels": 1,
+            "semiconductor_voxels": 7,
+        },
+        {},
+        {},
+        {},
+        errors,
+    )
+
+    assert compliance["porosity_tolerance"] == 0.125
+    assert compliance["porosity_within_tolerance"] is True
+    assert not errors
 
 
 def test_validator_fails_when_recomputed_molecule_count_misses_target(
@@ -339,10 +381,7 @@ def _write_complete_qa_export(
         "\n".join(
             [
                 "film:",
-                (
-                    "  target_box_A: "
-                    f"{{x: {target_box[0]}, y: {target_box[1]}, z: {target_box[2]}}}"
-                ),
+                (f"  target_box_A: {{x: {target_box[0]}, y: {target_box[1]}, z: {target_box[2]}}}"),
                 "pores:",
                 f"  target_porosity: {target_porosity}",
                 "pore_material:",
@@ -361,7 +400,9 @@ def _write_complete_qa_export(
     _write_channel_curves(qa / "channel_curves.h5", channel_curves or {})
     (qa / "final_surface.ply").write_text("ply\nformat ascii 1.0\nend_header\n", encoding="utf-8")
     _export_glb(qa / "semiconductor_solid_target.glb", glb_mesh or _box_mesh(target_box))
-    (qa / "main_unit_metrics.csv").write_text("unit_id,kind,anchor_x_A,anchor_y_A,anchor_z_A\n", encoding="utf-8")
+    (qa / "main_unit_metrics.csv").write_text(
+        "unit_id,kind,anchor_x_A,anchor_y_A,anchor_z_A\n", encoding="utf-8"
+    )
     _write_json(
         qa / "main_metrics.json",
         {
@@ -552,9 +593,7 @@ def test_validator_reads_v2_channel_group_and_integrates_variable_radius_volume(
     tmp_path: Path,
 ) -> None:
     unit_id = "channel-v2"
-    centerline = np.column_stack(
-        [np.linspace(0.0, 6.0, 7), np.ones(7), np.ones(7)]
-    )
+    centerline = np.column_stack([np.linspace(0.0, 6.0, 7), np.ones(7), np.ones(7)])
     radii = np.array([0.60, 0.72, 1.00, 0.88, 0.55, 0.96, 0.70])
     equivalent_radius = 0.8
     record = _channel_v2_record(
@@ -577,11 +616,7 @@ def test_validator_reads_v2_channel_group_and_integrates_variable_radius_volume(
         np.linspace(0.0, 1.0, radii.size),
         radii,
     )(dense_s)
-    expected = (
-        math.pi
-        * float(cumulative[-1])
-        * float(np.trapezoid(dense_radii**2, dense_s))
-    )
+    expected = math.pi * float(cumulative[-1]) * float(np.trapezoid(dense_radii**2, dense_s))
     expected += 2.0 * math.pi * (float(radii[0]) ** 3 + float(radii[-1]) ** 3) / 3.0
 
     report = validate_export(qa)
@@ -596,9 +631,7 @@ def test_validator_reads_v2_channel_group_and_integrates_variable_radius_volume(
 
 def test_validator_rejects_v2_channel_with_tampered_realized_eta(tmp_path: Path) -> None:
     unit_id = "channel-v2-bad-eta"
-    centerline = np.column_stack(
-        [np.linspace(0.0, 6.0, 7), np.ones(7), np.ones(7)]
-    )
+    centerline = np.column_stack([np.linspace(0.0, 6.0, 7), np.ones(7), np.ones(7)])
     radii = np.array([0.60, 0.72, 1.00, 0.88, 0.55, 0.96, 0.70])
     record = _channel_v2_record(
         unit_id,
@@ -650,10 +683,7 @@ def _channel_v2_record(
                         np.linspace(0.0, 1.0, 4097),
                     )
                 )
-                + 2.0
-                * math.pi
-                * (float(radii[0]) ** 3 + float(radii[-1]) ** 3)
-                / 3.0
+                + 2.0 * math.pi * (float(radii[0]) ** 3 + float(radii[-1]) ** 3) / 3.0
             ),
             "eta": arc_length / (2.0 * equivalent_radius_A),
             "tau": arc_length / end_distance,
@@ -716,6 +746,7 @@ def _write_channel_curves_v2(
             group.create_dataset("centerline_A", data=np.asarray(centerline, dtype=float))
             group.create_dataset("radius_A", data=np.asarray(radii, dtype=float))
 
+
 def test_validator_rejects_v2_compact_target_volume_mismatch(tmp_path: Path) -> None:
     from porous_film.geometry.complex_shapes import generate_multilobe_profile
 
@@ -750,9 +781,7 @@ def test_validator_rejects_v2_compact_target_volume_mismatch(tmp_path: Path) -> 
 
 def test_validator_rejects_v2_channel_target_volume_mismatch(tmp_path: Path) -> None:
     unit_id = "channel-v2-bad-volume"
-    centerline = np.column_stack(
-        [np.linspace(0.0, 6.0, 7), np.ones(7), np.ones(7)]
-    )
+    centerline = np.column_stack([np.linspace(0.0, 6.0, 7), np.ones(7), np.ones(7)])
     radii = np.array([0.60, 0.72, 1.00, 0.88, 0.55, 0.96, 0.70])
     record = _channel_v2_record(
         unit_id,
@@ -773,6 +802,7 @@ def test_validator_rejects_v2_channel_target_volume_mismatch(tmp_path: Path) -> 
     assert report.status == "FAIL"
     assert "target_volume" in " ".join(report.errors)
 
+
 def test_validator_rejects_v1_compact_target_volume_mismatch(tmp_path: Path) -> None:
     record = {
         "schema_version": 1,
@@ -790,6 +820,7 @@ def test_validator_rejects_v1_compact_target_volume_mismatch(tmp_path: Path) -> 
 
     assert report.status == "FAIL"
     assert "target_volume" in " ".join(report.errors)
+
 
 def test_validator_uses_continuous_pchip_radius_cv_not_sparse_nodes(
     tmp_path: Path,
@@ -946,16 +977,18 @@ def _shift_schema_v3_centerline_evidence(qa: Path, *, dx_A: float) -> None:
         encoding="utf-8",
     )
 
-    rows = (qa / "final_cross_sections.csv").read_text(
-        encoding="utf-8",
-    ).splitlines()
+    rows = (
+        (qa / "final_cross_sections.csv")
+        .read_text(
+            encoding="utf-8",
+        )
+        .splitlines()
+    )
     header = rows[0]
     shifted_rows = [header]
     for row in csv.DictReader(rows):
         row["center_x_A"] = str(float(row["center_x_A"]) + dx_A)
-        shifted_rows.append(
-            ",".join(row[field] for field in (header.split(",")))
-        )
+        shifted_rows.append(",".join(row[field] for field in (header.split(","))))
     (qa / "final_cross_sections.csv").write_text(
         "\n".join(shifted_rows) + "\n",
         encoding="utf-8",
@@ -971,6 +1004,54 @@ def test_validator_rejects_empty_schema_v3_final_measurements(tmp_path: Path) ->
 
     assert report.status == "FAIL"
     assert "final_measurements.json" in " ".join(report.errors)
+
+
+def test_validator_requires_final_compact_geometry_evidence(tmp_path: Path) -> None:
+    qa = _write_schema_v3_geometry_export(tmp_path)
+    measurements_path = qa / "final_measurements.json"
+    measurements = json.loads(measurements_path.read_text(encoding="utf-8"))
+    measurements.pop("compact_geometries")
+    measurements_path.write_text(
+        json.dumps(measurements, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _write_checksums(qa)
+
+    report = validate_export(qa)
+
+    assert report.status == "FAIL"
+    assert "compact_geometries" in " ".join(report.errors)
+
+
+def test_validator_compares_compact_validity_evidence() -> None:
+    rebuilt = (
+        _V3CompactGeometryMeasurement(
+            component_id=1,
+            voxel_count=3,
+            eta=None,
+            valid=False,
+            invalid_reason="insufficient_component_voxels",
+        ),
+    )
+    errors: list[str] = []
+
+    _compare_v3_json_compacts(
+        [
+            {
+                "component_id": 1,
+                "voxel_count": 3,
+                "eta": None,
+                "valid": True,
+                "invalid_reason": None,
+            }
+        ],
+        rebuilt,
+        errors,
+    )
+
+    combined = " ".join(errors)
+    assert "valid" in combined
+    assert "invalid_reason" in combined
 
 
 def test_validator_rejects_phase_shape_inconsistent_with_spacing_metadata(
@@ -1033,6 +1114,34 @@ def test_validator_rebuilds_gxy_from_through_centerlines_only() -> None:
     assert measured.center_distance_xy.pair_count == 0
 
 
+def test_validator_uses_orientation_aspect_ratio_tolerance() -> None:
+    phase = _phase_from_slice_centers([[(6.0, 6.0)]] * 8, radius_A=1.8)
+
+    strict = _v3_measure_final_geometry(
+        phase,
+        _V3MeasurementContract(orientation_aspect_ratio_tolerance=0.0),
+    )
+    tolerant = _v3_measure_final_geometry(
+        phase,
+        _V3MeasurementContract(orientation_aspect_ratio_tolerance=2.0),
+    )
+
+    assert strict.projected_orientations[0].theta_xz_identifiable
+    assert not tolerant.projected_orientations[0].theta_xz_identifiable
+
+
+def test_validator_reads_legacy_audit_orientation_aspect_ratio_tolerance() -> None:
+    errors: list[str] = []
+
+    contract = _v3_measurement_contract(
+        {"audit": {"orientation_aspect_ratio_tolerance": 0.25}},
+        errors,
+    )
+
+    assert contract.orientation_aspect_ratio_tolerance == 0.25
+    assert not errors
+
+
 def test_validator_excludes_only_local_branch_neighborhood_sections() -> None:
     phase = _phase_from_slice_centers(
         [
@@ -1071,9 +1180,7 @@ def test_validator_excludes_only_local_branch_neighborhood_sections() -> None:
         for section in measured.cross_sections
     )
     assert any(
-        section.track_id in branched_ids
-        and section.valid
-        and section.invalid_reason is None
+        section.track_id in branched_ids and section.valid and section.invalid_reason is None
         for section in measured.cross_sections
     )
     assert all(
@@ -1110,6 +1217,7 @@ def test_validator_v3_target_compliance_uses_rebuilt_diameter_distribution(
     normalized_path = qa / "normalized_config.yaml"
     normalized = yaml.safe_load(normalized_path.read_text(encoding="utf-8"))
     normalized["formal_targets"]["shape"]["equivalent_diameter_A"]["value"] = 99.0
+    normalized["pore_constraints"] = {"z_connectivity": "all_components"}
     normalized_path.write_text(yaml.safe_dump(normalized, sort_keys=True), encoding="utf-8")
     _write_checksums(qa)
 
@@ -1118,6 +1226,287 @@ def test_validator_v3_target_compliance_uses_rebuilt_diameter_distribution(
     assert report.status == "FAIL"
     assert report.target_compliance["equivalent_diameter_A_within_tolerance"] is False
     assert "equivalent_diameter_A" in " ".join(report.errors)
+
+
+def test_validator_distribution_contract_supports_weibull_like_main_audit() -> None:
+    probabilities = (np.arange(64, dtype=float) + 0.5) / 64.0
+    samples = stats.weibull_min(c=2.5, loc=1.0, scale=4.0).ppf(probabilities)
+
+    result = _v3_distribution_target_result(
+        samples,
+        {"family": "weibull", "shape": 2.5, "loc": 1.0, "scale": 4.0},
+    )
+
+    assert result["passed"]
+
+
+def test_validator_distribution_metrics_match_main_audit_contract() -> None:
+    probabilities = (np.arange(64, dtype=float) + 0.5) / 64.0
+    cases = [
+        (
+            stats.lognorm(s=0.4, loc=1.0, scale=3.0).ppf(probabilities),
+            {"family": "lognormal", "s": 0.4, "loc": 1.0, "scale": 3.0},
+        ),
+        (
+            stats.gamma(a=2.5, loc=0.5, scale=1.5).ppf(probabilities),
+            {"family": "gamma", "alpha": 2.5, "loc": 0.5, "theta": 1.5},
+        ),
+        (
+            stats.weibull_min(c=2.0, loc=1.0, scale=4.0).ppf(probabilities),
+            {"family": "weibull_min", "k": 2.0, "loc": 1.0, "scale": 4.0},
+        ),
+        (
+            stats.truncnorm(a=-1.0, b=2.0, loc=5.0, scale=2.0).ppf(probabilities),
+            {
+                "family": "truncated_normal",
+                "mean": 5.0,
+                "sigma": 2.0,
+                "lower": 3.0,
+                "upper": 9.0,
+            },
+        ),
+        (
+            stats.beta(a=2.0, b=3.0, loc=10.0, scale=20.0).ppf(probabilities),
+            {
+                "family": "beta",
+                "alpha": 2.0,
+                "beta": 3.0,
+                "minimum": 10.0,
+                "maximum": 30.0,
+            },
+        ),
+    ]
+
+    for samples, target in cases:
+        main = compare_samples_to_distribution(samples, target, 0.20, 0.20)
+        independent = _v3_distribution_target_result(samples, target)
+
+        assert independent["passed"] == main.passed
+        assert np.isclose(independent["ks"], main.ks)
+        assert np.isclose(
+            independent["normalized_wasserstein"],
+            main.normalized_wasserstein,
+        )
+
+
+def test_validator_joint_orientation_rejects_crossed_component_pairs() -> None:
+    target = {
+        "components": [
+            {
+                "weight": 0.5,
+                "theta_xz_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 70.0,
+                    "upper": 80.0,
+                },
+                "theta_xy_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 0.0,
+                    "upper": 10.0,
+                },
+            },
+            {
+                "weight": 0.5,
+                "theta_xz_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 0.0,
+                    "upper": 10.0,
+                },
+                "theta_xy_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 70.0,
+                    "upper": 80.0,
+                },
+            },
+        ]
+    }
+
+    result = _v3_compare_paired_orientation_pairs(np.array([[75.0, 75.0], [5.0, 5.0]]), target)
+
+    assert not result["passed"]
+    assert result["unassigned_pair_count"] == 2
+
+
+def test_validator_enforces_matrix_and_final_sample_constraints(tmp_path: Path) -> None:
+    qa = _write_schema_v3_geometry_export(tmp_path)
+    normalized_path = qa / "normalized_config.yaml"
+    normalized = yaml.safe_load(normalized_path.read_text(encoding="utf-8"))
+    normalized["matrix_constraints"] = {
+        "enabled": True,
+        "require_x_percolation": False,
+        "minimum_cross_section_fraction": 1.0,
+        "maximum_overlap_fraction": 1.0,
+    }
+    normalized["pore_constraints"] = {
+        "z_connectivity": "unrestricted",
+        "minimum_through_centerlines": 2,
+        "minimum_valid_cross_sections": 100,
+    }
+    normalized_path.write_text(yaml.safe_dump(normalized, sort_keys=True), encoding="utf-8")
+    _write_checksums(qa)
+
+    report = validate_export(qa)
+
+    errors = " ".join(report.errors)
+    assert report.status == "FAIL"
+    assert "minimum semiconductor cross-section" in errors
+    assert "minimum through centerlines" in errors
+    assert "minimum valid cross-sections" in errors
+
+
+def test_validator_unrestricted_skips_through_dependent_target_gates(tmp_path: Path) -> None:
+    qa = _write_schema_v3_geometry_export(tmp_path)
+
+    report = validate_export(qa)
+
+    assert not any("schema-v3 target" in error for error in report.errors)
+    for name in (
+        "equivalent_diameter_A",
+        "theta_xz_deg",
+        "theta_xy_deg",
+        "channel_eta",
+        "channel_tau",
+        "curvature_fluctuation",
+    ):
+        assert report.target_compliance[f"{name}_evaluated"] is False
+        assert report.target_compliance[f"{name}_within_tolerance"] is None
+    assert report.target_compliance["paired_orientation_evaluated"] is False
+    assert report.target_compliance["paired_orientation_within_tolerance"] is None
+    assert report.target_compliance["g_xy_evaluated"] is False
+    assert report.target_compliance["g_xy_within_tolerance"] is None
+    assert report.target_compliance["pore_z_connectivity_within_constraint"] is None
+    assert report.target_compliance["minimum_through_centerlines_within_constraint"] is None
+    assert report.target_compliance["minimum_valid_cross_sections_within_constraint"] is None
+
+
+def test_validator_enforces_all_components_z_connectivity(tmp_path: Path) -> None:
+    qa = _write_schema_v3_geometry_export(tmp_path)
+    normalized_path = qa / "normalized_config.yaml"
+    normalized = yaml.safe_load(normalized_path.read_text(encoding="utf-8"))
+    normalized["pore_constraints"] = {"z_connectivity": "all_components"}
+    normalized_path.write_text(yaml.safe_dump(normalized, sort_keys=True), encoding="utf-8")
+    with h5py.File(qa / "final_phase.h5", "r+") as handle:
+        mask = np.asarray(handle["pore_mask"], dtype=np.uint8)
+        mask[5, 0, 9] = 1
+        handle["pore_mask"][...] = mask
+    _write_checksums(qa)
+
+    report = validate_export(qa)
+
+    assert report.status == "FAIL"
+    assert report.target_compliance["pore_z_connectivity_within_constraint"] is False
+    assert "all pore components" in " ".join(report.errors)
+
+
+def test_validator_applies_skeleton_thickness_before_matrix_percolation(
+    tmp_path: Path,
+) -> None:
+    qa = _write_schema_v3_geometry_export(tmp_path)
+    normalized_path = qa / "normalized_config.yaml"
+    normalized = yaml.safe_load(normalized_path.read_text(encoding="utf-8"))
+    normalized["matrix_constraints"] = {
+        "enabled": True,
+        "require_x_percolation": True,
+        "minimum_cross_section_fraction": 0.0,
+        "maximum_overlap_fraction": 1.0,
+        "minimum_skeleton_thickness_A": 100.0,
+    }
+    normalized_path.write_text(yaml.safe_dump(normalized, sort_keys=True), encoding="utf-8")
+    _write_checksums(qa)
+
+    report = validate_export(qa)
+
+    assert report.status == "FAIL"
+    assert report.target_compliance["matrix_x_percolation_within_constraint"] is False
+    assert "percolate along periodic x" in " ".join(report.errors)
+
+
+def test_validator_independently_enforces_maximum_overlap_fraction(tmp_path: Path) -> None:
+    qa = _write_schema_v3_geometry_export(tmp_path)
+    normalized_path = qa / "normalized_config.yaml"
+    normalized = yaml.safe_load(normalized_path.read_text(encoding="utf-8"))
+    normalized["matrix_constraints"] = {
+        "enabled": True,
+        "require_x_percolation": False,
+        "minimum_cross_section_fraction": 0.0,
+        "maximum_overlap_fraction": 0.0,
+    }
+    normalized_path.write_text(yaml.safe_dump(normalized, sort_keys=True), encoding="utf-8")
+    record = {
+        "schema_version": 1,
+        "unit_id": "compact-overlap-a",
+        "kind": "compact",
+        "latent_parameters": {
+            "radius_A": 3.0,
+            "radii_A": [3.0, 3.0, 3.0],
+            "superellipsoid_exponent": 2.0,
+            "roughness": 0.0,
+            "target_volume_A3": None,
+        },
+        "realized_geometry": {
+            "anchor_A": [3.5, 5.5, 5.0],
+            "center_A": [3.5, 5.5, 5.0],
+            "radii_A": [3.0, 3.0, 3.0],
+            "orientation_quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+    }
+    duplicate = json.loads(json.dumps(record))
+    duplicate["unit_id"] = "compact-overlap-b"
+    (qa / "unit_geometry.jsonl").write_text(
+        json.dumps(record) + "\n" + json.dumps(duplicate) + "\n",
+        encoding="utf-8",
+    )
+    _write_checksums(qa)
+
+    report = validate_export(qa)
+
+    assert report.status == "FAIL"
+    assert report.independent_metrics["units"]["overlap_fraction"] > 0.0
+    assert report.target_compliance["pore_overlap_within_constraint"] is False
+    assert "overlap fraction" in " ".join(report.errors)
+
+
+def test_validator_overlap_reconstruction_matches_main_audit() -> None:
+    from porous_film.geometry import BuiltGeometry, CompactUnit, PoreGeometry
+    from porous_film.metrics.audit import _overlap_fraction
+    from porous_film.voxel import voxelize_geometry
+
+    units = [
+        CompactUnit.sphere("compact-a", np.array([5.0, 5.0, 5.0]), 3.0),
+        CompactUnit.sphere("compact-b", np.array([7.0, 5.0, 5.0]), 3.0),
+    ]
+    geometry = PoreGeometry(units, np.array([12.0, 12.0, 12.0]))
+    built = BuiltGeometry(
+        geometry=geometry,
+        units=units,
+        realized_anchors_A=np.vstack([unit.anchor_A for unit in units]),
+        latent_to_realized_ids={},
+    )
+    grid = voxelize_geometry(geometry, geometry.target_box_A, 1.0)
+    phase = _PhaseData(
+        mask=grid.pore_mask,
+        spacing_A=grid.spacing_A,
+        target_box_A=grid.target_box_A,
+        origin_A=grid.origin_A,
+    )
+
+    main = _overlap_fraction(built, grid, [])
+    independent = _independent_overlap_fraction(
+        [unit.to_record() for unit in units],
+        {},
+        phase,
+        [],
+    )
+
+    assert independent == main
 
 
 def test_validator_full_schema_v3_execution_does_not_import_main_package(
@@ -1191,12 +1580,8 @@ def _sync_schema_v3_targets_to_reported_measurements(qa: Path) -> None:
     normalized = yaml.safe_load(normalized_path.read_text(encoding="utf-8"))
     shape = normalized["formal_targets"]["shape"]
     normalized["formal_targets"]["position_quantity"]["center_distance_xy"] = None
-    valid_sections = [
-        section for section in measurements["cross_sections"] if section["valid"]
-    ]
-    valid_channels = [
-        channel for channel in measurements["channel_geometries"] if channel["valid"]
-    ]
+    valid_sections = [section for section in measurements["cross_sections"] if section["valid"]]
+    valid_channels = [channel for channel in measurements["channel_geometries"] if channel["valid"]]
     shape["equivalent_diameter_A"] = {
         "family": "constant",
         "value": valid_sections[0]["equivalent_diameter_A"],

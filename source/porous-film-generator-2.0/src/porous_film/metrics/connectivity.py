@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy import ndimage
 
 _CONNECTIVITY_6 = ndimage.generate_binary_structure(3, 1)
+
+
+@dataclass(frozen=True)
+class PoreZConnectivitySummary:
+    component_count: int
+    through_component_count: int
+
+    @property
+    def all_components_through(self) -> bool:
+        return self.component_count > 0 and self.through_component_count == self.component_count
 
 
 def periodic_percolates_x(mask_zyx: np.ndarray) -> bool:
@@ -67,6 +79,22 @@ def pore_component_summary(mask_zyx: np.ndarray) -> tuple[int, float]:
     phase_roots = np.array([_find_root(parents, label) for label in labels[mask]], dtype=np.int32)
     unique_roots, counts = np.unique(phase_roots[phase_roots != 0], return_counts=True)
     return int(unique_roots.size), float(np.max(counts) / phase_count)
+
+
+def pore_z_connectivity_summary(mask_zyx: np.ndarray) -> PoreZConnectivitySummary:
+    """Count x/y-periodic pore components and those touching both finite z faces."""
+    mask = _as_bool_zyx(mask_zyx)
+    labels, label_count = ndimage.label(mask, structure=_CONNECTIVITY_6)
+    if label_count == 0:
+        return PoreZConnectivitySummary(0, 0)
+
+    parents = np.arange(label_count + 1, dtype=np.int32)
+    _merge_periodic_face_labels(parents, labels[:, :, 0], labels[:, :, -1])
+    _merge_periodic_face_labels(parents, labels[:, 0, :], labels[:, -1, :])
+    roots = {_find_root(parents, label) for label in range(1, label_count + 1)}
+    lower = {_find_root(parents, int(label)) for label in np.unique(labels[0]) if int(label) != 0}
+    upper = {_find_root(parents, int(label)) for label in np.unique(labels[-1]) if int(label) != 0}
+    return PoreZConnectivitySummary(len(roots), len(lower & upper))
 
 
 def _merge_periodic_face_labels(parents: np.ndarray, first: np.ndarray, second: np.ndarray) -> None:

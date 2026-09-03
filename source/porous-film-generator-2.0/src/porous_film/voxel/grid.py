@@ -11,6 +11,7 @@ import h5py
 import numpy as np
 
 from porous_film.geometry import BuiltGeometry, PoreGeometry
+from porous_film.performance import profile_stage
 
 _SCHEMA_VERSION = 1
 _AXIS_ORDER = "zyx"
@@ -132,6 +133,16 @@ def voxelize_geometry(
     spacing_A: float,
     max_points_per_chunk: int = 1_000_000,
 ) -> PhaseGrid:
+    with profile_stage("voxelization"):
+        return _voxelize_geometry(geometry, box_A, spacing_A, max_points_per_chunk)
+
+
+def _voxelize_geometry(
+    geometry: PoreGeometry,
+    box_A: np.ndarray,
+    spacing_A: float,
+    max_points_per_chunk: int,
+) -> PhaseGrid:
     target_box = _as_box(box_A)
     spacing = _positive_float(spacing_A, "spacing_A")
     chunk_size = _positive_int(max_points_per_chunk, "max_points_per_chunk")
@@ -141,9 +152,7 @@ def voxelize_geometry(
         from porous_film.voxel import cupy_backend
 
         if not cupy_backend.cuda_backend_available():
-            raise RuntimeError(
-                "CUDA voxel backend was requested but CuPy CUDA is unavailable"
-            )
+            raise RuntimeError("CUDA voxel backend was requested but CuPy CUDA is unavailable")
         pore_mask = cupy_backend.voxelize_geometry_cupy(
             geometry,
             counts_xyz=counts_xyz,
@@ -186,9 +195,7 @@ def voxelize_geometry(
 def _voxel_backend() -> str:
     requested = os.environ.get("POROUS_FILM_VOXEL_BACKEND", "cpu").strip().lower()
     if requested not in {"cpu", "cuda", "auto"}:
-        raise ValueError(
-            "POROUS_FILM_VOXEL_BACKEND must be one of: cpu, cuda, auto"
-        )
+        raise ValueError("POROUS_FILM_VOXEL_BACKEND must be one of: cpu, cuda, auto")
     if requested != "auto":
         return requested
     from porous_film.voxel import cupy_backend
@@ -224,23 +231,86 @@ def solve_scale_for_porosity(
         voxel_divisions=voxel_divisions,
     )
     low_result = _evaluate_built_geometry(low, low_built, spacing)
-    high_result = _evaluate_scaled_geometry(build_at_linear_scale, high, spacing)
     low_phi = low_result[2].porosity
-    high_phi = high_result[2].porosity
-    if high_phi < low_phi:
-        raise ValueError("porosity must increase monotonically with linear scale")
-    if target < low_phi or target > high_phi:
-        raise ValueError("target porosity is not bracketed by lower and upper scales")
 
     nvox = _voxel_count(low_built.geometry.target_box_A, spacing)
     minimum_step = 1.0 / float(nvox)
-    if tol < minimum_step:
+    resolution_is_sufficient = tol >= minimum_step
+    if resolution_is_sufficient and abs(low_phi - target) <= tol:
+        return low_result
+
+    best = low_result
+    probe_scale = min(max(1.0, low), high)
+    probe_result = low_result
+    if resolution_is_sufficient and probe_scale > low and probe_scale < high:
+        probe_result = _evaluate_scaled_geometry(build_at_linear_scale, probe_scale, spacing)
+        probe_phi = probe_result[2].porosity
+        if probe_phi < low_phi:
+            raise ValueError("porosity must increase monotonically with linear scale")
+        best = min((best, probe_result), key=lambda result: abs(result[2].porosity - target))
+        if abs(probe_phi - target) <= tol:
+            return probe_result
+        if low_phi <= target <= probe_phi:
+            high = probe_scale
+            high_result = probe_result
+            high_phi = probe_phi
+        else:
+            low = probe_scale
+            low_result = probe_result
+            low_phi = probe_phi
+
+    bracketed = "high_result" in locals()
+    if resolution_is_sufficient and not bracketed and low_phi < target and low < high:
+        for _ in range(4):
+            if low_phi > 0.0:
+                predicted = low * (target / low_phi) ** (1.0 / 3.0)
+            else:
+                predicted = low * 2.0
+            minimum_progress = low + 0.02 * (high - low)
+            next_scale = min(high, max(predicted, minimum_progress))
+            if next_scale >= high:
+                break
+            next_result = _evaluate_scaled_geometry(
+                build_at_linear_scale,
+                next_scale,
+                spacing,
+            )
+            next_phi = next_result[2].porosity
+            if next_phi < low_phi:
+                raise ValueError("porosity must increase monotonically with linear scale")
+            if abs(next_phi - target) < abs(best[2].porosity - target):
+                best = next_result
+            if abs(next_phi - target) <= tol:
+                return next_result
+            if next_phi >= target:
+                high = next_scale
+                high_result = next_result
+                high_phi = next_phi
+                bracketed = True
+                break
+            low = next_scale
+            low_result = next_result
+            low_phi = next_phi
+
+    if not bracketed:
+        high_result = _evaluate_scaled_geometry(build_at_linear_scale, high, spacing)
+        high_phi = high_result[2].porosity
+        if high_phi < low_phi:
+            raise ValueError("porosity must increase monotonically with linear scale")
+        if abs(high_phi - target) < abs(best[2].porosity - target):
+            best = high_result
+    if target < low_phi or target > high_phi:
+        raise ValueError("target porosity is not bracketed by lower and upper scales")
+    if not resolution_is_sufficient:
         raise PorosityResolutionError(
             "tolerance is finer than the minimum resolvable porosity step "
             f"1/nvox={minimum_step:g} for nvox={nvox}"
         )
 
-    best = min((low_result, high_result), key=lambda result: abs(result[2].porosity - target))
+    best = min(
+        (best, low_result, high_result),
+        key=lambda result: abs(result[2].porosity - target),
+    )
     for _ in range(_SCALE_SOLVER_MAX_ITERATIONS):
         mid = 0.5 * (low + high)
         mid_result = _evaluate_scaled_geometry(build_at_linear_scale, mid, spacing)

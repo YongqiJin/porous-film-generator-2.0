@@ -106,9 +106,96 @@ def voxelize_geometry_cupy(
                 ),
                 axis=1,
             )
-            values = _geometry_sdf_array(cupy, geometry, points)
-            flat_mask[start:stop] = cupy.asnumpy(values < 0.0)
+            occupied = _geometry_occupancy_array(cupy, geometry, points)
+            flat_mask[start:stop] = cupy.asnumpy(occupied)
     return flat_mask.reshape((nz, ny, nx))
+
+
+def _geometry_occupancy_array(cupy: Any, geometry: PoreGeometry, points: Any) -> Any:
+    """Evaluate only points that can lie in a unit's zero-level support.
+
+    Voxelization needs the sign of the final smooth-union field, not its positive
+    distance far from every pore.  Restricting each unit evaluation to its
+    conservative periodic support avoids evaluating every channel at every grid
+    point while retaining the exact field calculation near the phase boundary.
+    """
+    if not geometry.units:
+        return cupy.zeros(points.shape[0], dtype=cupy.bool_)
+    result = cupy.full(points.shape[0], cupy.inf, dtype=cupy.float64)
+    box = np.asarray(geometry.target_box_A, dtype=float)
+    # A single periodic unit can contribute up to nine xy images.  The margin
+    # bounds the aggregate log-sum-exp tail omitted outside all unit supports.
+    margin_A = _smooth_min_skip_margin_A(max(1, 9 * len(geometry.units)))
+    for unit in geometry.units:
+        active = _unit_support_mask(cupy, unit, points, box, margin_A=margin_A)
+        if not bool(cupy.any(active).item()):
+            continue
+        field = _single_unit_sdf_array(cupy, unit, points[active], box)
+        result[active] = _smooth_min_pair(cupy, result[active], field)
+    return result < 0.0
+
+
+def _single_unit_sdf_array(
+    cupy: Any,
+    unit: CompactUnit | ChannelUnit,
+    points: Any,
+    box: np.ndarray,
+) -> Any:
+    if isinstance(unit, CompactUnit) and _compact_minimum_image_safe(unit, box):
+        return _compact_periodic_sdf(cupy, unit, points, box)
+    query_min = cupy.asnumpy(cupy.amin(points, axis=0))
+    query_max = cupy.asnumpy(cupy.amax(points, axis=0))
+    result = cupy.full(points.shape[0], cupy.inf, dtype=cupy.float64)
+    x_shifts = _periodic_shifts(
+        unit,
+        axis=0,
+        query_min=float(query_min[0]),
+        query_max=float(query_max[0]),
+        box=box,
+    )
+    y_shifts = _periodic_shifts(
+        unit,
+        axis=1,
+        query_min=float(query_min[1]),
+        query_max=float(query_max[1]),
+        box=box,
+    )
+    for x_shift in x_shifts:
+        for y_shift in y_shifts:
+            offset = cupy.asarray([x_shift, y_shift, 0.0], dtype=cupy.float64)
+            result = _smooth_min_pair(cupy, result, _unit_sdf(cupy, unit, points - offset))
+    return result
+
+
+def _unit_support_mask(
+    cupy: Any,
+    unit: CompactUnit | ChannelUnit,
+    points: Any,
+    box: np.ndarray,
+    *,
+    margin_A: float,
+) -> Any:
+    if isinstance(unit, CompactUnit):
+        support = float(np.max(unit.radii_A)) * (1.0 + float(unit.roughness))
+        lower = np.asarray(unit.center_A, dtype=float) - support
+        upper = np.asarray(unit.center_A, dtype=float) + support
+    else:
+        lower = np.min(np.asarray(unit.segment_aabb_min_A, dtype=float), axis=0)
+        upper = np.max(np.asarray(unit.segment_aabb_max_A, dtype=float), axis=0)
+
+    active = cupy.ones(points.shape[0], dtype=cupy.bool_)
+    margin = float(margin_A)
+    for axis in (0, 1):
+        span = float(upper[axis] - lower[axis])
+        if span >= float(box[axis]):
+            continue
+        center = 0.5 * float(lower[axis] + upper[axis])
+        half_width = 0.5 * span
+        delta = cupy.mod(points[:, axis] - center + 0.5 * box[axis], box[axis]) - 0.5 * box[axis]
+        active &= cupy.abs(delta) <= half_width + margin
+    active &= points[:, 2] >= float(lower[2]) - margin
+    active &= points[:, 2] <= float(upper[2]) + margin
+    return active
 
 
 def _geometry_sdf_array(cupy: Any, geometry: PoreGeometry, points: Any) -> Any:

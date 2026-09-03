@@ -6,10 +6,21 @@ from scipy import stats
 from porous_film.centers import CenterSeedPlan
 from porous_film.config import GeneratorConfig
 from porous_film.geometry import BuiltGeometry, ChannelUnit, CompactUnit, PoreGeometry
-from porous_film.metrics import audit_target_distributions, compare_samples_to_distribution
-from porous_film.metrics.audit import _porosity_tolerance, _primary_targets_passed
+from porous_film.metrics import (
+    audit_target_distributions,
+    compare_samples_to_distribution,
+    measure_final_geometry,
+)
+from porous_film.metrics.audit import (
+    _compare_paired_orientation_pairs,
+    _grid_points,
+    _local_thickness_stability_result,
+    _porosity_tolerance,
+    _primary_targets_passed,
+    _unit_occupancy_masks,
+)
 from porous_film.metrics.local_thickness import ThicknessStabilityResult
-from porous_film.voxel import PhaseGrid
+from porous_film.voxel import PhaseGrid, voxelize_geometry
 
 
 def test_audit_result_exposes_every_required_metric() -> None:
@@ -78,10 +89,13 @@ def test_audit_passed_gates_channel_fraction_rdf_and_mixture_weight_errors() -> 
         seed_density=0.002,
         target_porosity=0.10,
         channel_fraction=0.0,
-        compact_eta={"family": "mixture", "components": [
-            {"weight": 0.5, "family": "constant", "value": 1.0},
-            {"weight": 0.5, "family": "constant", "value": 3.0},
-        ]},
+        compact_eta={
+            "family": "mixture",
+            "components": [
+                {"weight": 0.5, "family": "constant", "value": 1.0},
+                {"weight": 0.5, "family": "constant", "value": 3.0},
+            ],
+        },
     )
     pore_mask = np.zeros((10, 10, 10), dtype=bool)
     pore_mask.ravel()[:100] = True
@@ -476,6 +490,64 @@ def test_audit_merges_pore_components_across_periodic_x_and_y_faces() -> None:
     assert np.isclose(result.largest_pore_fraction, 1.0)
 
 
+def test_cached_unit_occupancy_masks_match_direct_brute_force_phase() -> None:
+    box = np.array([8.0, 8.0, 8.0])
+    units = [
+        CompactUnit.sphere("left", np.array([0.5, 4.0, 4.0]), 1.5),
+        CompactUnit.sphere("middle", np.array([4.0, 4.0, 4.0]), 1.25),
+    ]
+    built = BuiltGeometry(
+        geometry=PoreGeometry(units, box),
+        units=units,
+        realized_anchors_A=np.vstack([unit.anchor_A for unit in units]),
+        latent_to_realized_ids={},
+    )
+    grid = voxelize_geometry(built.geometry, box, 0.5)
+    indices = np.arange(grid.pore_mask.size, dtype=np.int64)
+    points = _grid_points(indices, grid.pore_mask.shape, grid.spacing_A, grid.origin_A)
+
+    actual = _unit_occupancy_masks(built, grid)
+
+    for unit, unit_mask in zip(units, actual, strict=True):
+        expected = PoreGeometry([unit], box).sdf(points).reshape(grid.pore_mask.shape) < 0.0
+        assert np.array_equal(unit_mask, expected)
+
+
+def test_local_thickness_stability_reuses_supplied_fine_grid(monkeypatch) -> None:
+    config = _audit_config(
+        box=(8.0, 8.0, 8.0),
+        seed_density=1.0 / 512.0,
+        target_porosity=0.01,
+        channel_fraction=0.0,
+    )
+    config = config.model_copy(
+        update={
+            "audit": config.audit.model_copy(
+                update={"coarse_spacing_A": 2.0, "fine_spacing_A": 1.0}
+            )
+        }
+    )
+    built = _built(config, [])
+    fine_grid = PhaseGrid(
+        np.zeros((8, 8, 8), dtype=bool),
+        np.zeros(3),
+        1.0,
+        np.array([8.0, 8.0, 8.0]),
+    )
+    spacings: list[float] = []
+
+    def recording_voxelize(geometry, box_A, spacing_A):
+        spacings.append(float(spacing_A))
+        return voxelize_geometry(geometry, box_A, spacing_A)
+
+    monkeypatch.setattr("porous_film.metrics.audit.voxelize_geometry", recording_voxelize)
+
+    result = _local_thickness_stability_result(config, built, [], fine_grid=fine_grid)
+
+    assert result.passed
+    assert spacings == [2.0]
+
+
 def _audit_config(
     *,
     box: tuple[float, float, float] = (10.0, 10.0, 10.0),
@@ -613,7 +685,9 @@ def test_complex_compact_volume_distribution_uses_continuous_unit_geometry() -> 
                 unit_id=f"compact-{index:04d}",
                 center_A=center,
                 radii_A=profile.envelope_radii_A,
-                orientation=Rotation.from_euler("xyz", [17 * index, 11 * index, 23 * index], degrees=True),
+                orientation=Rotation.from_euler(
+                    "xyz", [17 * index, 11 * index, 23 * index], degrees=True
+                ),
                 exponent=2.0,
                 roughness=0.0,
                 latent_theta_rad=0.0,
@@ -640,17 +714,14 @@ def test_complex_compact_volume_distribution_uses_continuous_unit_geometry() -> 
     )
 
     clipped = [
-        item["realized_clipped_volume_A3"]
-        for item in result.unit_volume_summary["per_unit"]
+        item["realized_clipped_volume_A3"] for item in result.unit_volume_summary["per_unit"]
     ]
-    continuous = [
-        item["realized_volume_A3"]
-        for item in result.unit_volume_summary["per_unit"]
-    ]
+    continuous = [item["realized_volume_A3"] for item in result.unit_volume_summary["per_unit"]]
     assert len(set(clipped)) > 1
     assert np.allclose(continuous, 100.0, rtol=0.03)
     assert result.compact_relative_volume_result is not None
     assert result.compact_relative_volume_result.passed
+
 
 def test_channel_eta_tau_constant_targets_use_geometry_relative_tolerance() -> None:
     from porous_film.geometry import build_units
@@ -683,18 +754,15 @@ def test_channel_eta_tau_constant_targets_use_geometry_relative_tolerance() -> N
         _phase_grid(config, pore_mask),
     )
 
-    eta_errors = np.abs(
-        np.asarray([unit.eta for unit in built.units]) / 5.0 - 1.0
-    )
-    tau_errors = np.abs(
-        np.asarray([unit.tortuosity for unit in built.units]) / 1.3 - 1.0
-    )
+    eta_errors = np.abs(np.asarray([unit.eta for unit in built.units]) / 5.0 - 1.0)
+    tau_errors = np.abs(np.asarray([unit.tortuosity for unit in built.units]) / 1.3 - 1.0)
     assert np.max(eta_errors) <= 0.01
     assert np.max(tau_errors) <= 0.01
     assert result.channel_eta_result is not None
     assert result.channel_eta_result.passed
     assert result.tau_result is not None
     assert result.tau_result.passed
+
 
 def test_identical_compact_and_channel_roughness_targets_are_not_duplicated_mixture() -> None:
     config = _audit_config(
@@ -900,7 +968,9 @@ def test_schema_v3_audit_uses_final_phase_instead_of_generation_unit_metrics() -
 
 
 def test_schema_v3_audit_reports_final_geometry_distribution_results() -> None:
-    config = _schema_v3_audit_config()
+    raw = _schema_v3_audit_config().model_dump(mode="python")
+    raw["pore_constraints"] = {"z_connectivity": "all_components"}
+    config = GeneratorConfig.model_validate(raw)
     grid = _two_vertical_pore_grid()
     built = BuiltGeometry(
         geometry=PoreGeometry([], grid.target_box_A),
@@ -925,11 +995,207 @@ def test_schema_v3_audit_reports_final_geometry_distribution_results() -> None:
     assert result.curvature_fluctuation_result is not None
 
 
+def test_schema_v3_unrestricted_skips_through_dependent_target_gates() -> None:
+    base = _two_vertical_pore_grid()
+    mask = base.pore_mask.copy()
+    mask[10:] = False
+    grid = PhaseGrid(mask, base.origin_A, base.spacing_A, base.target_box_A)
+    raw = _schema_v3_audit_config().model_dump(mode="python")
+    raw["formal_targets"]["proportion"]["porosity"] = grid.porosity
+    raw["pore_constraints"] = {"z_connectivity": "unrestricted"}
+    config = GeneratorConfig.model_validate(raw)
+    built = BuiltGeometry(
+        geometry=PoreGeometry([], grid.target_box_A),
+        units=[],
+        realized_anchors_A=np.empty((0, 3)),
+        latent_to_realized_ids={},
+    )
+
+    result = audit_target_distributions(config, built, _center_plan([]), grid)
+
+    assert result.passed
+    assert result.through_centerline_count == 0
+    assert result.equivalent_diameter_result is None
+    assert result.theta_xz_result is None
+    assert result.theta_xy_result is None
+    assert result.channel_eta_result is None
+    assert result.tau_result is None
+    assert result.curvature_fluctuation_result is None
+    assert result.paired_orientation_result is None
+    assert result.center_distance_xy_result is not None
+    assert result.center_distance_xy_result["evaluated"] is False
+    assert result.center_distance_xy_result["passed"] is None
+    assert not any("no valid samples" in warning for warning in result.warnings)
+
+
+def test_schema_v3_audit_gates_configured_minimum_final_samples() -> None:
+    raw = _schema_v3_audit_config().model_dump(mode="python")
+    raw["pore_constraints"] = {
+        "minimum_through_centerlines": 2,
+        "minimum_valid_cross_sections": 100,
+    }
+    config = GeneratorConfig.model_validate(raw)
+    base = _two_vertical_pore_grid()
+    grid = PhaseGrid(
+        base.pore_mask & (np.indices(base.pore_mask.shape)[2] < 10),
+        base.origin_A,
+        base.spacing_A,
+        base.target_box_A,
+    )
+    built = BuiltGeometry(
+        geometry=PoreGeometry([], grid.target_box_A),
+        units=[],
+        realized_anchors_A=np.empty((0, 3)),
+        latent_to_realized_ids={},
+    )
+
+    result = audit_target_distributions(config, built, _center_plan([]), grid)
+
+    assert not result.passed
+    assert result.through_centerline_count == 1
+    assert result.valid_through_cross_section_count < 100
+    assert any("minimum through centerlines" in warning for warning in result.warnings)
+    assert any("minimum valid cross-sections" in warning for warning in result.warnings)
+
+
+def test_schema_v3_audit_gates_all_final_pore_components_through_z() -> None:
+    raw = _schema_v3_audit_config().model_dump(mode="python")
+    raw["pore_constraints"] = {"z_connectivity": "all_components"}
+    raw["formal_targets"]["shape"]["compact_aspect_ratio"] = None
+    config = GeneratorConfig.model_validate(raw)
+    base = _two_vertical_pore_grid()
+    mask = base.pore_mask.copy()
+    mask[10, 2, 10] = True
+    grid = PhaseGrid(mask, base.origin_A, base.spacing_A, base.target_box_A)
+    built = BuiltGeometry(
+        geometry=PoreGeometry([], grid.target_box_A),
+        units=[],
+        realized_anchors_A=np.empty((0, 3)),
+        latent_to_realized_ids={},
+    )
+
+    result = audit_target_distributions(config, built, _center_plan([]), grid)
+
+    assert not result.passed
+    assert result.through_pore_domain_count < result.connected_pore_domains
+    assert any("all pore components" in warning for warning in result.warnings)
+
+
+def test_all_components_marks_unconfigured_final_distributions_not_applicable() -> None:
+    grid = _two_vertical_pore_grid()
+    raw = _schema_v3_audit_config().model_dump(mode="python")
+    raw["formal_targets"]["position_quantity"]["center_distance_xy"] = None
+    for name in (
+        "equivalent_diameter_A",
+        "orientation",
+        "compact_aspect_ratio",
+        "channel_aspect_ratio",
+        "channel_tortuosity",
+        "curvature_fluctuation",
+    ):
+        raw["formal_targets"]["shape"][name] = None
+    raw["formal_targets"]["proportion"]["porosity"] = grid.porosity
+    raw["pore_constraints"] = {"z_connectivity": "all_components"}
+    config = GeneratorConfig.model_validate(raw)
+    built = BuiltGeometry(
+        geometry=PoreGeometry([], grid.target_box_A),
+        units=[],
+        realized_anchors_A=np.empty((0, 3)),
+        latent_to_realized_ids={},
+    )
+
+    result = audit_target_distributions(config, built, _center_plan([]), grid)
+
+    assert result.passed
+    assert result.center_distance_xy_result["evaluated"] is False
+    assert result.center_distance_xy_result["passed"] is None
+    assert result.distribution_results == {}
+    assert result.paired_orientation_result is None
+
+
+def test_paired_orientation_audit_rejects_wrong_joint_pairing_with_matching_marginals() -> None:
+    target = {
+        "components": [
+            {
+                "weight": 0.5,
+                "theta_xz_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 70.0,
+                    "upper": 80.0,
+                },
+                "theta_xy_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 0.0,
+                    "upper": 10.0,
+                },
+            },
+            {
+                "weight": 0.5,
+                "theta_xz_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 0.0,
+                    "upper": 10.0,
+                },
+                "theta_xy_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 70.0,
+                    "upper": 80.0,
+                },
+            },
+        ]
+    }
+
+    matching = _compare_paired_orientation_pairs(np.array([[75.0, 5.0], [5.0, 75.0]]), target)
+    crossed = _compare_paired_orientation_pairs(np.array([[75.0, 75.0], [5.0, 5.0]]), target)
+
+    assert matching["passed"]
+    assert not crossed["passed"]
+    assert crossed["unassigned_pair_count"] == 2
+
+
+def test_schema_v3_audit_compares_final_compact_component_eta() -> None:
+    z, y, x = np.indices((20, 20, 20), dtype=float)
+    mask = ((x + 0.5 - 10.0) / 4.5) ** 2 + ((y + 0.5 - 10.0) / 2.5) ** 2 + (
+        (z + 0.5 - 10.0) / 2.5
+    ) ** 2 <= 1.0
+    base_config = _schema_v3_audit_config()
+    probe_grid = PhaseGrid(mask, np.zeros(3), 1.0, np.array([20.0, 20.0, 20.0]))
+    probe = measure_final_geometry(probe_grid, base_config.measurement)
+    eta = probe.compact_geometries[0].eta
+    raw = base_config.model_dump(mode="python")
+    raw["formal_targets"]["shape"]["compact_aspect_ratio"] = {
+        "family": "constant",
+        "value": eta,
+    }
+    raw["formal_targets"]["proportion"]["porosity"] = probe_grid.porosity
+    config = GeneratorConfig.model_validate(raw)
+    built = BuiltGeometry(
+        geometry=PoreGeometry([], probe_grid.target_box_A),
+        units=[],
+        realized_anchors_A=np.empty((0, 3)),
+        latent_to_realized_ids={},
+    )
+
+    result = audit_target_distributions(config, built, _center_plan([]), probe_grid)
+
+    assert result.compact_eta_result is not None
+    assert result.compact_eta_result.passed
+
 
 def test_pipeline_audit_summary_serializes_final_geometry_measurements() -> None:
     from porous_film.pipeline import _audit_summary
 
-    config = _schema_v3_audit_config()
+    raw = _schema_v3_audit_config().model_dump(mode="python")
+    raw["pore_constraints"] = {"z_connectivity": "all_components"}
+    config = GeneratorConfig.model_validate(raw)
     grid = _two_vertical_pore_grid()
     built = BuiltGeometry(
         geometry=PoreGeometry([], grid.target_box_A),

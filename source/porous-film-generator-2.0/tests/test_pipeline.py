@@ -140,7 +140,11 @@ def test_run_full_writes_mandatory_qa_and_optimizer_files(
 
     assert all(path.exists() for path in qa_expected + optimizer_expected)
 
-    header = (result.paths.outputs / "molecule_instances.csv").read_text(encoding="utf-8").splitlines()[0]
+    header = (
+        (result.paths.outputs / "molecule_instances.csv")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
     assert header.split(",") == [
         "instance_id",
         "source_hash",
@@ -628,12 +632,14 @@ def test_optimizer_json_serializes_representative_requested_and_realized_design_
     requested = json.loads((result.paths.outputs / "requested_design_parameters.json").read_text())
     realized = json.loads((result.paths.outputs / "realized_geometry_parameters.json").read_text())
 
-    assert requested["pores"]["channel_fraction_by_count"] == data["pores"][
-        "channel_fraction_by_count"
-    ]
-    assert requested["pores"]["channel_to_compact_mean_volume_ratio"] == data["pores"][
-        "channel_to_compact_mean_volume_ratio"
-    ]
+    assert (
+        requested["pores"]["channel_fraction_by_count"]
+        == data["pores"]["channel_fraction_by_count"]
+    )
+    assert (
+        requested["pores"]["channel_to_compact_mean_volume_ratio"]
+        == data["pores"]["channel_to_compact_mean_volume_ratio"]
+    )
     assert requested["center_distribution"]["position_jitter"] == 0.125
     assert requested["orientation"]["distribution"]["alpha"] == 3.0
     assert requested["compact"]["relative_volume"]["components"][1]["value"] == 1.25
@@ -835,8 +841,7 @@ def _write_packmol_audit_run(
         encoding="utf-8",
     )
     (run_root / "inputs" / "normalized_config.yaml").write_text(
-        "audit:\n"
-        f"  interface_mixing_layer_fraction: {interface_fraction}\n",
+        f"audit:\n  interface_mixing_layer_fraction: {interface_fraction}\n",
         encoding="utf-8",
     )
 
@@ -865,7 +870,13 @@ def test_generate_geometry_cli_retains_inputs(sample_config_path: Path, tmp_path
     )
 
     assert result.exit_code == 0
-    run_root = Path(result.stdout.strip())
+    output_lines = result.stdout.strip().splitlines()
+    assert output_lines[0].startswith("Result directory: ")
+    assert output_lines[1].startswith("Runtime: ")
+    assert output_lines[1].endswith(" s")
+    assert float(output_lines[1].removeprefix("Runtime: ").removesuffix(" s")) >= 0.0
+    assert output_lines[2] in {"Audit result: PASS", "Audit result: FAIL"}
+    run_root = Path(output_lines[0].removeprefix("Result directory: "))
     assert (run_root / "inputs" / "normalized_config.yaml").exists()
     assert (run_root / "inputs" / "argon.pdb").exists()
 
@@ -918,9 +929,11 @@ def test_run_directory_cli_commands_use_existing_artifacts(
     assert (result.paths.analysis / "packmol-output-audit.json").exists()
 
 
-def test_asymmetric_padding_shifts_reference_coordinates_to_packing_frame(tmp_path: Path) -> None:
+def test_asymmetric_padding_shifts_coordinates_to_packing_frame(tmp_path: Path) -> None:
     from porous_film.config import load_config
-    from porous_film.pipeline import run_full
+    from porous_film.molecules import MoleculeTemplate
+    from porous_film.molecules.packing import InstanceTransform, PackingResult
+    from porous_film.pipeline import _packing_frame_result
 
     config_path = write_config(
         tmp_path,
@@ -932,24 +945,31 @@ def test_asymmetric_padding_shifts_reference_coordinates_to_packing_frame(tmp_pa
         minimum_cross_section_fraction=0.0,
     )
 
-    result = run_full(load_config(config_path), tmp_path)
-    target_cif = (result.paths.outputs / "pore_material_high_precision.cif").read_text(
-        encoding="utf-8"
+    config = load_config(config_path)
+    template = MoleculeTemplate.from_pdb(Path("tests/fixtures/argon.pdb"))
+    target_position = np.array([[1.0, 2.0, 3.0]])
+    packing_result = PackingResult(
+        count=1,
+        atom_positions_A=target_position,
+        instance_transforms=(
+            InstanceTransform(
+                translation_A=target_position[0],
+                quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+            ),
+        ),
+        minimum_interatomic_distance_A=float("inf"),
+        actual_density_g_cm3=0.0,
+        protrusion_metrics={},
+        status="accepted",
+        template=template,
+        target_box_A=np.array([20.0, 20.0, 20.0]),
+        pore_volume_A3=1.0,
     )
-    reference_cif = (result.paths.outputs / "pore_reference_coordinates.cif").read_text(
-        encoding="utf-8"
-    )
-    target_z = _first_cif_atom_z(target_cif)
-    reference_z = _first_cif_atom_z(reference_cif)
+    shifted = _packing_frame_result(config, packing_result)
 
-    assert reference_z == pytest.approx(target_z + 7.0, abs=1.0e-9)
-
-
-def _first_cif_atom_z(text: str) -> float:
-    for line in text.splitlines():
-        if line.startswith("HETATM "):
-            return float(line.split()[9])
-    raise AssertionError("CIF contained no HETATM row")
+    assert shifted.atom_positions_A == pytest.approx(target_position + [0.0, 0.0, 7.0])
+    assert shifted.instance_transforms[0].translation_A == pytest.approx([1.0, 2.0, 10.0])
+    assert shifted.target_box_A == pytest.approx([20.0, 20.0, 30.0])
 
 
 def _read_glb_json(path: Path) -> dict:
@@ -1079,7 +1099,6 @@ def test_shape_complexity_metrics_are_written_per_unit_and_summarized(
     assert summary["channel"]["bend_count"]["minimum"] >= 2
 
 
-
 def _pipeline_v3_config_dict() -> dict:
     return {
         "schema_version": 3,
@@ -1172,7 +1191,6 @@ def test_schema_v3_preflight_and_input_copy_do_not_require_pdb_or_padding(
     assert config.film.packing_box_A == config.film.target_box_A
 
 
-
 def _pipeline_v3_phase_grid():
     from porous_film.voxel import PhaseGrid
 
@@ -1244,17 +1262,41 @@ def test_geometry_artifacts_write_final_phase_centerlines_and_cross_sections(
     assert (paths.qa_export / "final_surface.ply").is_file()
     assert (paths.qa_export / "semiconductor_solid_target.glb").is_file()
     assert (paths.qa_export / "checksums.sha256").is_file()
+    assert (paths.qa_export / "performance.json").is_file()
     assert (paths.outputs / "semiconductor_solid_target.glb").is_file()
     assert (paths.outputs / "visual-report" / "index.html").is_file()
+    performance = json.loads((paths.qa_export / "performance.json").read_text())
+    assert performance["stage_timings_seconds"]["export"] >= 0.0
+    assert performance["peak_rss_mib"] > 0.0
     with h5py.File(paths.qa_export / "final_centerlines.h5", "r") as handle:
         assert handle.attrs["schema_version"] == 3
         assert len(handle["centerlines"]) >= 1
-    header = (paths.qa_export / "final_cross_sections.csv").read_text(
-        encoding="utf-8"
-    ).splitlines()[0]
+    header = (
+        (paths.qa_export / "final_cross_sections.csv").read_text(encoding="utf-8").splitlines()[0]
+    )
     assert "equivalent_diameter_A" in header
     assert "curvature_fluctuation" in header
 
+
+def test_serial_geometry_generation_reuses_selected_candidate_artifacts(
+    sample_config_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from porous_film.config import load_config
+    from porous_film.pipeline import generate_geometry
+    from porous_film.storage import create_task_paths_at_root
+
+    def unexpected_replay(*args, **kwargs):
+        raise AssertionError("serial generation must not replay the selected candidate")
+
+    monkeypatch.setattr("porous_film.pipeline.replay_candidate", unexpected_replay)
+    paths = create_task_paths_at_root(tmp_path / "single-pass")
+
+    run = generate_geometry(load_config(sample_config_path), paths)
+
+    assert run.phase_grid.porosity == run.candidate_results[0].porosity
+    assert run.performance is not None
 
 
 def test_execute_single_seed_schema_v3_without_pore_material_skips_packing(
@@ -1278,7 +1320,9 @@ def test_execute_single_seed_schema_v3_without_pore_material_skips_packing(
         candidate_results=(),
         selected_candidate=SimpleNamespace(),
     )
-    monkeypatch.setattr("porous_film.pipeline.generate_geometry", lambda *args, **kwargs: geometry_run)
+    monkeypatch.setattr(
+        "porous_film.pipeline.generate_geometry", lambda *args, **kwargs: geometry_run
+    )
     monkeypatch.setattr("porous_film.pipeline._write_reports", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "porous_film.pipeline.MoleculeTemplate.from_pdb",

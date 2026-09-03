@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from porous_film.config import GeneratorConfig, load_config
+from porous_film.config import DistributionSpec, GeneratorConfig, load_config
 
 
 def _minimal_config(overrides: dict | None = None) -> dict:
@@ -282,9 +282,7 @@ def test_rdf_components_reject_bad_kind_and_negative_amplitude() -> None:
             "center_distribution": {
                 "mode": "rdf",
                 "position_jitter": 0.0,
-                "rdf": [
-                    {"kind": "valley", "amplitude": 0.25, "center_xi": 0.8, "width_xi": 0.15}
-                ],
+                "rdf": [{"kind": "valley", "amplitude": 0.25, "center_xi": 0.8, "width_xi": 0.15}],
             }
         }
     )
@@ -293,9 +291,7 @@ def test_rdf_components_reject_bad_kind_and_negative_amplitude() -> None:
             "center_distribution": {
                 "mode": "rdf",
                 "position_jitter": 0.0,
-                "rdf": [
-                    {"kind": "peak", "amplitude": -0.25, "center_xi": 0.8, "width_xi": 0.15}
-                ],
+                "rdf": [{"kind": "peak", "amplitude": -0.25, "center_xi": 0.8, "width_xi": 0.15}],
             }
         }
     )
@@ -485,6 +481,179 @@ def test_schema_v3_groups_formal_targets_into_three_dimensions() -> None:
     assert parsed.formal_targets.shape.curvature_fluctuation.components[1].upper == 0.8
     assert parsed.formal_targets.proportion.porosity == 0.18
     assert parsed.generation_controls.seed_number_density_A3 == 0.00025
+
+
+@pytest.mark.parametrize(
+    ("distribution", "message"),
+    [
+        ({"family": "normal", "mean": 0.0, "sigma": 1.0}, "unsupported distribution family"),
+        ({"family": "constant"}, "constant distribution requires value"),
+        ({"family": "lognormal", "sigma": 0.0}, "lognormal sigma"),
+        ({"family": "gamma"}, "gamma distribution requires one of"),
+        (
+            {"family": "weibull", "shape": 2.0, "scale": 0.0},
+            "weibull scale must be positive",
+        ),
+        (
+            {
+                "family": "truncated_normal",
+                "mean": 0.0,
+                "sigma": 1.0,
+                "lower": 2.0,
+                "upper": 1.0,
+            },
+            "truncated normal upper support",
+        ),
+        (
+            {
+                "family": "beta",
+                "alpha": 2.0,
+                "beta": 2.0,
+                "lower": 1.0,
+                "upper": 1.0,
+            },
+            "beta upper support",
+        ),
+    ],
+)
+def test_distribution_specs_fail_during_config_validation(
+    distribution: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        DistributionSpec.model_validate(distribution)
+
+
+def test_distribution_specs_reject_conflicting_aliases() -> None:
+    with pytest.raises(ValueError, match="gamma shape aliases are mutually exclusive"):
+        DistributionSpec.model_validate(
+            {"family": "gamma", "alpha": 2.0, "shape": 3.0}
+        )
+
+
+def test_distribution_specs_reject_ignored_family_parameters() -> None:
+    with pytest.raises(ValueError, match="constant distribution does not use parameters: alpha"):
+        DistributionSpec.model_validate(
+            {"family": "constant", "value": 1.0, "alpha": 2.0}
+        )
+
+
+def test_schema_v3_accepts_explicit_pore_topology_and_sample_constraints() -> None:
+    config = _schema_v3_config()
+    config["formal_targets"]["shape"].pop("compact_aspect_ratio")
+    config["generation_controls"]["channel_fraction_by_count"] = 1.0
+    config["pore_constraints"] = {
+        "z_connectivity": "all_components",
+        "minimum_through_centerlines": 3,
+        "minimum_valid_cross_sections": 12,
+    }
+
+    parsed = GeneratorConfig.model_validate(config)
+
+    assert parsed.pore_constraints.z_connectivity == "all_components"
+    assert parsed.pore_constraints.minimum_through_centerlines == 3
+    assert parsed.pore_constraints.minimum_valid_cross_sections == 12
+
+
+def test_unrestricted_schema_v3_allows_omitting_through_only_targets() -> None:
+    config = _schema_v3_config()
+    config["formal_targets"]["position_quantity"].pop("center_distance_xy")
+    for name in (
+        "equivalent_diameter_A",
+        "orientation",
+        "channel_aspect_ratio",
+        "channel_tortuosity",
+        "curvature_fluctuation",
+    ):
+        config["formal_targets"]["shape"].pop(name)
+    config["pore_constraints"] = {"z_connectivity": "unrestricted"}
+
+    parsed = GeneratorConfig.model_validate(config)
+
+    assert parsed.formal_targets.position_quantity.center_distance_xy is None
+    assert parsed.formal_targets.shape.equivalent_diameter_A is None
+    assert parsed.formal_targets.shape.orientation is None
+    assert parsed.formal_targets.shape.channel_aspect_ratio is None
+    assert parsed.formal_targets.shape.channel_tortuosity is None
+    assert parsed.formal_targets.shape.curvature_fluctuation is None
+
+
+def test_all_components_schema_v3_allows_omitting_unrequested_distribution_targets() -> None:
+    config = _schema_v3_config()
+    config["formal_targets"]["shape"].pop("compact_aspect_ratio")
+    config["formal_targets"]["position_quantity"].pop("center_distance_xy")
+    for name in (
+        "equivalent_diameter_A",
+        "orientation",
+        "channel_aspect_ratio",
+        "channel_tortuosity",
+        "curvature_fluctuation",
+    ):
+        config["formal_targets"]["shape"].pop(name)
+    config["generation_controls"]["channel_fraction_by_count"] = 1.0
+    config["pore_constraints"] = {"z_connectivity": "all_components"}
+
+    parsed = GeneratorConfig.model_validate(config)
+
+    assert parsed.pore_constraints.z_connectivity == "all_components"
+    assert parsed.formal_targets.shape.orientation is None
+
+
+def test_schema_v3_migrates_orientation_aspect_tolerance_to_measurement() -> None:
+    config = _schema_v3_config()
+    config["audit"]["orientation_aspect_ratio_tolerance"] = 0.25
+
+    parsed = GeneratorConfig.model_validate(config)
+
+    assert parsed.measurement.orientation_aspect_ratio_tolerance == 0.25
+    assert not hasattr(parsed.audit, "orientation_aspect_ratio_tolerance")
+
+
+def test_all_components_z_mode_rejects_nonchannel_generation() -> None:
+    config = _schema_v3_config()
+    config["pore_constraints"] = {"z_connectivity": "all_components"}
+
+    with pytest.raises(ValueError, match="all_components.*channel_fraction_by_count"):
+        GeneratorConfig.model_validate(config)
+
+
+def test_all_components_z_mode_rejects_compact_final_target() -> None:
+    config = _schema_v3_config()
+    config["generation_controls"]["channel_fraction_by_count"] = 1.0
+    config["pore_constraints"] = {"z_connectivity": "all_components"}
+
+    with pytest.raises(ValueError, match="all_components.*compact_aspect_ratio"):
+        GeneratorConfig.model_validate(config)
+
+
+def test_all_components_z_mode_preflights_requested_through_track_count() -> None:
+    config = _schema_v3_config()
+    config["formal_targets"]["shape"].pop("compact_aspect_ratio")
+    config["generation_controls"]["channel_fraction_by_count"] = 1.0
+    config["pore_constraints"] = {
+        "z_connectivity": "all_components",
+        "minimum_through_centerlines": 121,
+    }
+
+    with pytest.raises(ValueError, match="minimum_through_centerlines.*planned channel count"):
+        GeneratorConfig.model_validate(config)
+
+
+def test_unrestricted_z_mode_preflights_requested_through_track_count() -> None:
+    config = _schema_v3_config()
+    config["pore_constraints"] = {"minimum_through_centerlines": 91}
+
+    with pytest.raises(ValueError, match="minimum_through_centerlines.*planned channel count"):
+        GeneratorConfig.model_validate(config)
+
+
+def test_valid_cross_section_minimum_requires_a_planned_channel() -> None:
+    config = _schema_v3_config()
+    config["generation_controls"]["channel_fraction_by_count"] = 0.0
+    config["pore_constraints"] = {"minimum_valid_cross_sections": 1}
+
+    with pytest.raises(ValueError, match="minimum_valid_cross_sections.*planned channel"):
+        GeneratorConfig.model_validate(config)
 
 
 def test_schema_v3_orientation_requires_paired_beta_components() -> None:

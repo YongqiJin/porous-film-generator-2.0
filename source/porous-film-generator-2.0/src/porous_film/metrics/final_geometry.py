@@ -86,6 +86,15 @@ class ChannelGeometryMeasurement:
 
 
 @dataclass(frozen=True)
+class CompactGeometryMeasurement:
+    component_id: int
+    voxel_count: int
+    eta: float | None
+    valid: bool
+    invalid_reason: str | None
+
+
+@dataclass(frozen=True)
 class FinalGeometryMeasurements:
     porosity: float
     slice_centers: tuple[SliceCenterRecord, ...]
@@ -96,6 +105,7 @@ class FinalGeometryMeasurements:
     cross_sections: tuple[CrossSectionMeasurement, ...]
     projected_orientations: tuple[ProjectedOrientationMeasurement, ...]
     channel_geometries: tuple[ChannelGeometryMeasurement, ...]
+    compact_geometries: tuple[CompactGeometryMeasurement, ...]
 
 
 @dataclass
@@ -118,8 +128,7 @@ def measure_final_geometry(
         contract.z_slice_spacing_A,
     )
     slices = tuple(
-        _measure_slice_centers(grid, int(z_index), contract)
-        for z_index in sampled_indices
+        _measure_slice_centers(grid, int(z_index), contract) for z_index in sampled_indices
     )
     centerlines, branch_count, branch_z_by_track = _track_slice_centers(
         slices,
@@ -136,23 +145,44 @@ def measure_final_geometry(
         maximum_distance_A=contract.center_distance_max_A,
         reference_samples=contract.center_distance_reference_samples,
     )
+    sampled_centerlines = {
+        track.track_id: _resample_centerline(
+            _smoothed_track_points(track.points_unwrapped_A),
+            track.wall_distances_A,
+            sample_spacing_A=contract.centerline_sample_spacing_A,
+        )
+        for track in centerlines
+    }
     cross_sections = _measure_normal_cross_sections(
         grid,
         centerlines,
         contract,
         branch_z_by_track=branch_z_by_track,
+        sampled_centerlines=sampled_centerlines,
     )
+    channel_geometries = tuple(
+        _channel_geometry(
+            track,
+            cross_sections,
+            centerline_points_A=sampled_centerlines[track.track_id][0],
+        )
+        for track in centerlines
+    )
+    channel_geometry_by_track = {value.track_id: value for value in channel_geometries}
     projected_orientations = tuple(
         _projected_orientation(
             track,
             minimum_projection_fraction=contract.orientation_projection_min_fraction,
+            channel_aspect_ratio=(
+                channel_geometry_by_track[track.track_id].eta
+                if channel_geometry_by_track[track.track_id].valid
+                else None
+            ),
+            aspect_ratio_tolerance=contract.orientation_aspect_ratio_tolerance,
         )
         for track in centerlines
     )
-    channel_geometries = tuple(
-        _channel_geometry(track, cross_sections)
-        for track in centerlines
-    )
+    compact_geometries = _measure_compact_geometries(grid)
     return FinalGeometryMeasurements(
         porosity=grid.porosity,
         slice_centers=slices,
@@ -163,13 +193,113 @@ def measure_final_geometry(
         cross_sections=cross_sections,
         projected_orientations=projected_orientations,
         channel_geometries=channel_geometries,
+        compact_geometries=compact_geometries,
     )
+
+
+def _measure_compact_geometries(
+    grid: PhaseGrid,
+) -> tuple[CompactGeometryMeasurement, ...]:
+    labels, label_count = ndimage.label(
+        grid.pore_mask,
+        structure=ndimage.generate_binary_structure(3, 1),
+    )
+    if label_count == 0:
+        return ()
+    parents = np.arange(label_count + 1, dtype=int)
+
+    def find(label: int) -> int:
+        while parents[label] != label:
+            parents[label] = parents[parents[label]]
+            label = int(parents[label])
+        return label
+
+    def union(first: int, second: int) -> None:
+        if first == 0 or second == 0:
+            return
+        first_root = find(int(first))
+        second_root = find(int(second))
+        if first_root != second_root:
+            parents[second_root] = first_root
+
+    for first, second in zip(labels[:, :, 0].ravel(), labels[:, :, -1].ravel(), strict=True):
+        union(int(first), int(second))
+    for first, second in zip(labels[:, 0, :].ravel(), labels[:, -1, :].ravel(), strict=True):
+        union(int(first), int(second))
+
+    roots = np.zeros(label_count + 1, dtype=int)
+    for label in range(1, label_count + 1):
+        roots[label] = find(label)
+    rooted = roots[labels]
+    lower_roots = {int(value) for value in np.unique(rooted[0]) if int(value) != 0}
+    upper_roots = {int(value) for value in np.unique(rooted[-1]) if int(value) != 0}
+
+    output: list[CompactGeometryMeasurement] = []
+    for component_id, root in enumerate(sorted(set(roots[1:])), start=1):
+        if root in lower_roots or root in upper_roots:
+            continue
+        indices_zyx = np.argwhere(rooted == root)
+        if indices_zyx.shape[0] < 4:
+            output.append(
+                CompactGeometryMeasurement(
+                    component_id=component_id,
+                    voxel_count=int(indices_zyx.shape[0]),
+                    eta=None,
+                    valid=False,
+                    invalid_reason="insufficient_component_voxels",
+                )
+            )
+            continue
+        indices_xyz = indices_zyx[:, [2, 1, 0]].astype(float)
+        indices_xyz[:, 0] = _unwrap_periodic_indices(indices_xyz[:, 0], grid.pore_mask.shape[2])
+        indices_xyz[:, 1] = _unwrap_periodic_indices(indices_xyz[:, 1], grid.pore_mask.shape[1])
+        points_A = grid.origin_A + (indices_xyz + 0.5) * grid.spacing_A
+        centered = points_A - np.mean(points_A, axis=0)
+        covariance = centered.T @ centered / float(points_A.shape[0])
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        order = np.argsort(eigenvalues)[::-1]
+        projected = centered @ eigenvectors[:, order]
+        extents = np.ptp(projected, axis=0) + float(grid.spacing_A)
+        if np.any(extents <= 0.0) or not np.all(np.isfinite(extents)):
+            output.append(
+                CompactGeometryMeasurement(
+                    component_id=component_id,
+                    voxel_count=int(indices_zyx.shape[0]),
+                    eta=None,
+                    valid=False,
+                    invalid_reason="invalid_principal_extents",
+                )
+            )
+            continue
+        eta = float(extents[0] / np.sqrt(extents[1] * extents[2]))
+        output.append(
+            CompactGeometryMeasurement(
+                component_id=component_id,
+                voxel_count=int(indices_zyx.shape[0]),
+                eta=max(eta, 1.0),
+                valid=True,
+                invalid_reason=None,
+            )
+        )
+    return tuple(output)
+
+
+def _unwrap_periodic_indices(values: np.ndarray, size: int) -> np.ndarray:
+    wrapped = np.asarray(values, dtype=float)
+    unique = np.unique(wrapped.astype(int))
+    if unique.size < 2:
+        return wrapped.copy()
+    cyclic = np.concatenate((unique, unique[:1] + int(size)))
+    cut = int(unique[(int(np.argmax(np.diff(cyclic))) + 1) % unique.size])
+    return np.where(wrapped < cut, wrapped + int(size), wrapped)
 
 
 def _projected_orientation(
     track: CenterlineTrack,
     *,
     minimum_projection_fraction: float,
+    channel_aspect_ratio: float | None = None,
+    aspect_ratio_tolerance: float = 0.0,
 ) -> ProjectedOrientationMeasurement:
     if track.points_unwrapped_A.shape[0] < 2:
         return ProjectedOrientationMeasurement(
@@ -192,19 +322,27 @@ def _projected_orientation(
             theta_xy_identifiable=False,
         )
     axis = axis / norm
+    if (
+        channel_aspect_ratio is not None
+        and channel_aspect_ratio <= 1.0 + float(aspect_ratio_tolerance)
+    ):
+        return ProjectedOrientationMeasurement(
+            track_id=track.track_id,
+            axis=axis,
+            theta_xz_deg=None,
+            theta_xy_deg=None,
+            theta_xz_identifiable=False,
+            theta_xy_identifiable=False,
+        )
     xz_projection = float(np.hypot(axis[0], axis[2]))
     xy_projection = float(np.hypot(axis[0], axis[1]))
     xz_identifiable = xz_projection >= float(minimum_projection_fraction)
     xy_identifiable = xy_projection >= float(minimum_projection_fraction)
     theta_xz = (
-        float(np.degrees(np.arctan2(abs(axis[2]), abs(axis[0]))))
-        if xz_identifiable
-        else None
+        float(np.degrees(np.arctan2(abs(axis[2]), abs(axis[0])))) if xz_identifiable else None
     )
     theta_xy = (
-        float(np.degrees(np.arctan2(abs(axis[1]), abs(axis[0]))))
-        if xy_identifiable
-        else None
+        float(np.degrees(np.arctan2(abs(axis[1]), abs(axis[0])))) if xy_identifiable else None
     )
     return ProjectedOrientationMeasurement(
         track_id=track.track_id,
@@ -219,22 +357,20 @@ def _projected_orientation(
 def _channel_geometry(
     track: CenterlineTrack,
     cross_sections: tuple[CrossSectionMeasurement, ...],
+    *,
+    centerline_points_A: np.ndarray,
 ) -> ChannelGeometryMeasurement:
     if track.has_branch_neighborhood:
         return _invalid_channel_geometry(track.track_id, "branch_neighborhood")
-    if track.points_unwrapped_A.shape[0] < 2:
+    if centerline_points_A.shape[0] < 2:
         return _invalid_channel_geometry(track.track_id, "insufficient_centerline_points")
-    segment_lengths = np.linalg.norm(np.diff(track.points_unwrapped_A, axis=0), axis=1)
+    segment_lengths = np.linalg.norm(np.diff(centerline_points_A, axis=0), axis=1)
     arc_length = float(np.sum(segment_lengths))
-    end_distance = float(
-        np.linalg.norm(track.points_unwrapped_A[-1] - track.points_unwrapped_A[0])
-    )
+    end_distance = float(np.linalg.norm(centerline_points_A[-1] - centerline_points_A[0]))
     valid_sections = [
         section
         for section in cross_sections
-        if section.track_id == track.track_id
-        and section.valid
-        and section.area_A2 is not None
+        if section.track_id == track.track_id and section.valid and section.area_A2 is not None
     ]
     if not valid_sections:
         return _invalid_channel_geometry(track.track_id, "no_valid_cross_sections")
@@ -276,10 +412,11 @@ def _measure_normal_cross_sections(
     contract: MeasurementSpec,
     *,
     branch_z_by_track: dict[int, np.ndarray],
+    sampled_centerlines: dict[int, tuple[np.ndarray, np.ndarray]],
 ) -> tuple[CrossSectionMeasurement, ...]:
     output: list[CrossSectionMeasurement] = []
     for track in tracks:
-        points = _smoothed_track_points(track.points_unwrapped_A)
+        points, wall_distances = sampled_centerlines[track.track_id]
         if points.shape[0] < 2:
             continue
         segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
@@ -308,7 +445,7 @@ def _measure_normal_cross_sections(
         for arc_position in positions:
             center, tangent, wall_distance = _interpolate_track(
                 points,
-                track.wall_distances_A,
+                wall_distances,
                 cumulative,
                 float(arc_position),
             )
@@ -347,14 +484,43 @@ def _smoothed_track_points(points_A: np.ndarray) -> np.ndarray:
     if points.shape[0] < 4:
         return points.copy()
     smoothed = np.column_stack(
-        [
-            ndimage.gaussian_filter1d(points[:, axis], sigma=1.0, mode="nearest")
-            for axis in range(3)
-        ]
+        [ndimage.gaussian_filter1d(points[:, axis], sigma=0.5, mode="nearest") for axis in range(3)]
     )
     smoothed[0] = points[0]
     smoothed[-1] = points[-1]
     return smoothed
+
+
+def _resample_centerline(
+    points_A: np.ndarray,
+    wall_distances_A: np.ndarray,
+    *,
+    sample_spacing_A: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    points = np.asarray(points_A, dtype=float)
+    walls = np.asarray(wall_distances_A, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or walls.shape != (points.shape[0],):
+        raise ValueError("centerline points and wall distances must have matching lengths")
+    if points.shape[0] < 2:
+        return points.copy(), walls.copy()
+    segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    keep = np.concatenate(([True], segment_lengths > 1.0e-12))
+    points = points[keep]
+    walls = walls[keep]
+    if points.shape[0] < 2:
+        return points.copy(), walls.copy()
+    cumulative = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))))
+    total_length = float(cumulative[-1])
+    positions = np.arange(0.0, total_length, float(sample_spacing_A), dtype=float)
+    if positions.size == 0 or total_length - positions[-1] > 1.0e-12:
+        positions = np.append(positions, total_length)
+    else:
+        positions[-1] = total_length
+    sampled_points = np.column_stack(
+        [np.interp(positions, cumulative, points[:, axis]) for axis in range(3)]
+    )
+    sampled_walls = np.interp(positions, cumulative, walls)
+    return sampled_points, sampled_walls
 
 
 def _interpolate_track(
@@ -607,10 +773,7 @@ def _closed_curve_curvature_fluctuation(
     sample_count = max(16, int(np.ceil(perimeter / float(resample_spacing_A))))
     sample_s = np.linspace(0.0, perimeter, sample_count, endpoint=False)
     sampled = np.column_stack(
-        [
-            np.interp(sample_s, cumulative, closed[:, axis])
-            for axis in range(2)
-        ]
+        [np.interp(sample_s, cumulative, closed[:, axis]) for axis in range(2)]
     )
     sigma = float(smoothing_length_A) / max(float(resample_spacing_A), 1.0e-12)
     if sigma > 0.0:
@@ -621,14 +784,10 @@ def _closed_curve_curvature_fluctuation(
             ]
         )
     step = perimeter / sample_count
-    first = (np.roll(sampled, -1, axis=0) - np.roll(sampled, 1, axis=0)) / (
-        2.0 * step
+    first = (np.roll(sampled, -1, axis=0) - np.roll(sampled, 1, axis=0)) / (2.0 * step)
+    second = (np.roll(sampled, -1, axis=0) - 2.0 * sampled + np.roll(sampled, 1, axis=0)) / (
+        step**2
     )
-    second = (
-        np.roll(sampled, -1, axis=0)
-        - 2.0 * sampled
-        + np.roll(sampled, 1, axis=0)
-    ) / (step**2)
     denominator = np.maximum(np.sum(first**2, axis=1) ** 1.5, 1.0e-12)
     curvature = (first[:, 0] * second[:, 1] - first[:, 1] * second[:, 0]) / denominator
     mean_curvature = float(np.mean(curvature))
@@ -817,8 +976,7 @@ def _periodic_slice_centers(
     accepted: list[SliceCenter] = []
     for wall_distance, xy in candidates:
         if any(
-            _periodic_xy_distance(xy, center.xy_A, box_xy)
-            <= minimum_separation_A + 1.0e-12
+            _periodic_xy_distance(xy, center.xy_A, box_xy) <= minimum_separation_A + 1.0e-12
             for center in accepted
         ):
             continue
@@ -1002,7 +1160,10 @@ def _track_slice_centers(
                 if previous_ids:
                     distances = _periodic_xy_distance_matrix(
                         np.vstack(
-                            [tracks[previous_id].wrapped_points_A[-1][:2] for previous_id in previous_ids]
+                            [
+                                tracks[previous_id].wrapped_points_A[-1][:2]
+                                for previous_id in previous_ids
+                            ]
                         ),
                         center.xy_A[np.newaxis, :],
                         box_xy,
@@ -1066,9 +1227,7 @@ def _through_center_slices(
     slices: tuple[SliceCenterRecord, ...],
     tracks: tuple[CenterlineTrack, ...],
 ) -> tuple[SliceCenterRecord, ...]:
-    centers_by_slice: dict[int, list[SliceCenter]] = {
-        record.z_index: [] for record in slices
-    }
+    centers_by_slice: dict[int, list[SliceCenter]] = {record.z_index: [] for record in slices}
     for track in tracks:
         if not track.is_through:
             continue
@@ -1118,5 +1277,3 @@ def _periodic_xy_distance_matrix(
         delta / box_xy_A[np.newaxis, np.newaxis, :]
     )
     return np.linalg.norm(delta, axis=2)
-
-

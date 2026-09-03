@@ -1,4 +1,5 @@
 import numpy as np
+from scipy import ndimage
 
 from porous_film.geometry.complex_shapes import (
     estimate_multilobe_volume_A3,
@@ -58,6 +59,33 @@ def test_variable_radius_channel_profile_is_deterministic_and_complex() -> None:
     assert first.bend_count >= 2
     assert first.nonplanarity > 0.0
     assert first.minimum_self_clearance_A >= 0.0
+
+
+def test_channel_profile_can_target_resolved_centerline_tortuosity() -> None:
+    target_tau = 1.10
+    profile = generate_variable_radius_channel_profile(
+        8_000.0,
+        4.0,
+        target_tau,
+        7713,
+        measured_centerline_sample_count=12,
+    )
+    sampled = sample_channel_centerline(profile.control_points_local_A, sample_count=12)
+    smoothed = np.column_stack(
+        [
+            ndimage.gaussian_filter1d(sampled[:, axis], sigma=0.5, mode="nearest")
+            for axis in range(3)
+        ]
+    )
+    smoothed[0] = sampled[0]
+    smoothed[-1] = sampled[-1]
+    measured_tau = float(
+        np.linalg.norm(np.diff(smoothed, axis=0), axis=1).sum()
+        / np.linalg.norm(smoothed[-1] - smoothed[0])
+    )
+
+    assert np.isclose(measured_tau, target_tau, rtol=1.0e-3)
+    assert profile.control_points_local_A.shape == (7, 3)
 
 
 def test_variable_radius_channel_profile_preserves_eta_tau_and_volume() -> None:

@@ -384,4 +384,28 @@ def test_porosity_scale_solver_rebuilds_geometry_and_preserves_records() -> None
     assert built.latent_to_realized_ids == latent_to_realized
     assert built.units[0].to_record()["realized_geometry"]["radii_A"] == [scale, scale, scale]
     assert requested_scales[0] == 0.5
-    assert requested_scales[1] == 3.0
+
+
+def test_porosity_scale_solver_uses_unit_scale_probe_without_changing_phase() -> None:
+    box_A = np.array([10.0, 10.0, 10.0])
+    reference_built = _sphere_builder(box_A)(1.0)
+    reference = voxelize_geometry(reference_built.geometry, box_A, 0.25)
+    requested_scales: list[float] = []
+    base_builder = _sphere_builder(box_A)
+
+    def recording_builder(scale: float) -> BuiltGeometry:
+        requested_scales.append(scale)
+        return base_builder(scale)
+
+    scale, _built, actual = solve_scale_for_porosity(
+        recording_builder,
+        target_phi=reference.porosity,
+        tolerance=0.001,
+        lower=0.5,
+        upper=3.0,
+        voxel_spacing_A=0.25,
+    )
+
+    assert scale == 1.0
+    assert np.array_equal(actual.pore_mask, reference.pore_mask)
+    assert requested_scales == [0.5, 1.0]

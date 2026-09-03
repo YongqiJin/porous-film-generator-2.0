@@ -4,6 +4,7 @@ import numpy as np
 
 from porous_film.config import MeasurementSpec
 from porous_film.metrics import measure_final_geometry
+from porous_film.metrics.final_geometry import _resample_centerline, _smoothed_track_points
 from porous_film.voxel import PhaseGrid
 
 
@@ -53,6 +54,77 @@ def _measurement_spec(**updates: float) -> MeasurementSpec:
     return MeasurementSpec.model_validate(values)
 
 
+def test_centerline_resampling_uses_configured_physical_arc_spacing() -> None:
+    points = np.array(
+        [
+            [1.0, 2.0, 0.0],
+            [1.0, 2.0, 1.0],
+            [1.0, 2.0, 2.0],
+            [1.0, 2.0, 3.0],
+            [1.0, 2.0, 4.0],
+        ]
+    )
+    wall_distances = np.arange(1.0, 6.0)
+
+    sampled_points, sampled_walls = _resample_centerline(
+        points,
+        wall_distances,
+        sample_spacing_A=2.5,
+    )
+
+    np.testing.assert_allclose(sampled_points[:, 2], [0.0, 2.5, 4.0])
+    np.testing.assert_allclose(sampled_walls, [1.0, 3.5, 5.0])
+
+
+def test_centerline_smoothing_preserves_resolved_tortuosity() -> None:
+    z = np.arange(12, dtype=float)
+    points = np.column_stack(
+        (
+            2.0 * np.sin(np.linspace(0.0, 2.0 * np.pi, z.size)),
+            np.zeros_like(z),
+            z,
+        )
+    )
+
+    def tortuosity(values: np.ndarray) -> float:
+        arc_length = float(np.linalg.norm(np.diff(values, axis=0), axis=1).sum())
+        end_distance = float(np.linalg.norm(values[-1] - values[0]))
+        return arc_length / end_distance
+
+    original_excess = tortuosity(points) - 1.0
+    smoothed_excess = tortuosity(_smoothed_track_points(points)) - 1.0
+
+    assert smoothed_excess >= 0.9 * original_excess
+
+
+def test_centerline_sample_spacing_controls_final_channel_arc_measurement() -> None:
+    centers = [[(4.0 if z_index % 2 == 0 else 8.0, 6.0)] for z_index in range(12)]
+    grid = _grid_from_slice_centers(centers, radius_A=1.4)
+
+    fine = measure_final_geometry(
+        grid,
+        _measurement_spec(
+            center_tracking_max_displacement_A=5.0,
+            centerline_sample_spacing_A=0.5,
+            cross_section_spacing_A=1.0,
+            surface_exclusion_length_A=0.0,
+        ),
+    )
+    coarse = measure_final_geometry(
+        grid,
+        _measurement_spec(
+            center_tracking_max_displacement_A=5.0,
+            centerline_sample_spacing_A=20.0,
+            cross_section_spacing_A=1.0,
+            surface_exclusion_length_A=0.0,
+        ),
+    )
+
+    assert fine.channel_geometries[0].valid
+    assert coarse.channel_geometries[0].valid
+    assert fine.channel_geometries[0].arc_length_A > coarse.channel_geometries[0].arc_length_A
+
+
 def test_final_geometry_extracts_one_straight_through_centerline() -> None:
     grid = _grid_from_slice_centers([[(6.0, 6.0)]] * 8)
 
@@ -70,6 +142,22 @@ def test_final_geometry_extracts_one_straight_through_centerline() -> None:
         np.tile(np.array([6.0, 6.0]), (8, 1)),
         atol=0.6,
     )
+
+
+def test_orientation_aspect_ratio_tolerance_controls_final_identifiability() -> None:
+    grid = _grid_from_slice_centers([[(6.0, 6.0)]] * 8)
+
+    strict = measure_final_geometry(
+        grid,
+        _measurement_spec(orientation_aspect_ratio_tolerance=0.0),
+    )
+    tolerant = measure_final_geometry(
+        grid,
+        _measurement_spec(orientation_aspect_ratio_tolerance=2.0),
+    )
+
+    assert strict.projected_orientations[0].theta_xz_identifiable
+    assert not tolerant.projected_orientations[0].theta_xz_identifiable
 
 
 def test_final_geometry_keeps_two_periodic_edge_centerlines_distinct() -> None:
@@ -135,6 +223,34 @@ def test_final_geometry_does_not_mark_internal_cavity_as_through() -> None:
     assert measured.through_centerline_count == 0
 
 
+def test_final_geometry_measures_compact_eta_from_internal_final_component() -> None:
+    z, y, x = np.indices((24, 24, 24), dtype=float)
+    pore = ((x + 0.5 - 12.0) / 4.5) ** 2 + ((y + 0.5 - 12.0) / 2.5) ** 2 + (
+        (z + 0.5 - 12.0) / 2.5
+    ) ** 2 <= 1.0
+    grid = PhaseGrid(
+        pore_mask=pore,
+        origin_A=np.zeros(3),
+        spacing_A=1.0,
+        target_box_A=np.array([24.0, 24.0, 24.0]),
+    )
+
+    measured = measure_final_geometry(grid, _measurement_spec())
+
+    assert len(measured.compact_geometries) == 1
+    compact = measured.compact_geometries[0]
+    assert compact.valid
+    assert compact.eta is not None
+    assert 1.5 < compact.eta < 2.5
+
+
+def test_final_geometry_excludes_z_through_component_from_compact_population() -> None:
+    grid = _grid_from_slice_centers([[(6.0, 6.0)]] * 8)
+
+    measured = measure_final_geometry(grid, _measurement_spec())
+
+    assert measured.compact_geometries == ()
+
 
 def test_xy_center_distance_uses_same_slice_periodic_distances_and_is_deterministic() -> None:
     grid = _grid_from_slice_centers(
@@ -152,7 +268,9 @@ def test_xy_center_distance_uses_same_slice_periodic_distances_and_is_determinis
     second = measure_final_geometry(grid, contract)
     distribution = first.center_distance_xy
 
-    np.testing.assert_array_equal(distribution.observed_pair_counts, second.center_distance_xy.observed_pair_counts)
+    np.testing.assert_array_equal(
+        distribution.observed_pair_counts, second.center_distance_xy.observed_pair_counts
+    )
     np.testing.assert_allclose(distribution.g_xy, second.center_distance_xy.g_xy)
     assert distribution.pair_count == 6
     peak_index = int(np.argmax(distribution.observed_pair_counts))
@@ -177,7 +295,6 @@ def test_xy_center_distance_uses_minimum_image_across_periodic_boundary() -> Non
     distribution = measured.center_distance_xy
     peak_index = int(np.argmax(distribution.observed_pair_counts))
     assert 1.0 <= distribution.bin_centers_A[peak_index] < 2.5
-
 
 
 def test_xy_center_distance_excludes_non_through_slice_centers() -> None:
@@ -315,7 +432,9 @@ def test_normal_cross_sections_measure_straight_cylinder_equivalent_diameter() -
     sections = _valid_cross_sections(measured)
 
     assert len(sections) >= 6
-    assert np.isclose(np.median([section.equivalent_diameter_A for section in sections]), 6.0, atol=0.7)
+    assert np.isclose(
+        np.median([section.equivalent_diameter_A for section in sections]), 6.0, atol=0.7
+    )
 
 
 def test_normal_cross_sections_remove_tilt_bias_from_equivalent_diameter() -> None:
@@ -392,7 +511,6 @@ def test_normal_cross_section_curvature_detects_angular_corrugation() -> None:
     )
 
     assert corrugated_w > smooth_w + 0.15
-
 
 
 def test_projected_orientation_recovers_xz_and_xy_angles() -> None:

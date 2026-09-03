@@ -5,6 +5,7 @@ import hashlib
 import json
 import pickle
 import shutil
+import time
 from collections.abc import Sequence
 from concurrent.futures import Executor
 from dataclasses import asdict, dataclass, replace
@@ -60,6 +61,7 @@ from porous_film.parallel import (
     estimate_generation_memory_bytes,
     estimate_worker_memory_bytes,
     evaluate_candidate_task,
+    evaluate_candidate_task_with_artifacts,
     execute_seed_task,
     replay_candidate,
     run_spawn_tasks,
@@ -69,6 +71,12 @@ from porous_film.parallel import (
     write_parallel_summary,
 )
 from porous_film.parallel.seeds import SeedTask, SeedTaskResult, _execute_seed_body
+from porous_film.performance import (
+    PerformanceSnapshot,
+    RuntimeProfiler,
+    activate_runtime_profiler,
+    profile_stage,
+)
 from porous_film.reporting.markdown import write_preflight_report, write_run_report
 from porous_film.reporting.visual import write_visual_report
 from porous_film.storage import (
@@ -107,6 +115,7 @@ class GeometryRun:
     paths: TaskPaths
     candidate_results: tuple[CandidateResult, ...]
     selected_candidate: CandidateIdentity
+    performance: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -156,9 +165,7 @@ def preflight(
         ("fine", config.audit.fine_spacing_A),
     ):
         if not _box_axes_are_divisible_by_spacing(target_box, float(spacing)):
-            errors.append(
-                f"target-box axes must be exactly divisible by {name} audit spacing_A"
-            )
+            errors.append(f"target-box axes must be exactly divisible by {name} audit spacing_A")
 
     spacing = float(config.audit.fine_spacing_A)
     estimated_voxels = _estimated_voxel_count(target_box, spacing)
@@ -201,10 +208,13 @@ def generate_geometry(
     candidate_executor: Executor | None = None,
 ) -> GeometryRun:
     """Generate and audit a pore geometry without packing molecules."""
+    run_started_at = time.perf_counter()
     tasks = build_candidate_tasks(config)
     plan = execution_plan or _candidate_execution_plan(config, len(tasks))
     write_parallel_plan(paths, plan)
     started = datetime.now(_SHANGHAI)
+    candidate_search_started_at = time.perf_counter()
+    retained_artifacts: dict[int, Any] = {}
     serial_fallback_reason: str | None = None
     if candidate_executor is not None:
         try:
@@ -303,17 +313,22 @@ def generate_geometry(
             serial_fallback_reason = f"{type(exc).__name__}: {exc}"
             results = []
             for task in tasks:
-                result = evaluate_candidate_task(task)
+                result, artifacts = evaluate_candidate_task_with_artifacts(task)
                 results.append(result)
+                if artifacts is not None:
+                    retained_artifacts[task.sequence_index] = artifacts
                 _write_parallel_progress(paths, result)
     else:
         results = []
         for task in tasks:
-            result = evaluate_candidate_task(task)
+            result, artifacts = evaluate_candidate_task_with_artifacts(task)
             results.append(result)
+            if artifacts is not None:
+                retained_artifacts[task.sequence_index] = artifacts
             _write_parallel_progress(paths, result)
 
     ordered_results = tuple(sorted(results, key=lambda result: result.sequence_index))
+    candidate_search_wall_time_seconds = time.perf_counter() - candidate_search_started_at
     write_parallel_summary(
         paths,
         plan,
@@ -327,7 +342,10 @@ def generate_geometry(
     _write_candidate_records(paths, ordered_results)
 
     selected = select_candidate(config, ordered_results)
-    replay = replay_candidate(config, selected.identity)
+    replay = retained_artifacts.get(selected.sequence_index)
+    selected_candidate_reused = replay is not None
+    if replay is None:
+        replay = replay_candidate(config, selected.identity)
     _require_replay_matches_summary(replay, selected)
     run = GeometryRun(
         config=config,
@@ -338,8 +356,17 @@ def generate_geometry(
         candidate_results=ordered_results,
         selected_candidate=selected.identity,
     )
-    _write_geometry_artifacts(config, run)
-    return run
+    return _write_geometry_artifacts(
+        config,
+        run,
+        candidate_performance=replay.performance,
+        run_started_at=run_started_at,
+        candidate_search_wall_time_seconds=candidate_search_wall_time_seconds,
+        selected_replay_wall_time_seconds=(
+            0.0 if selected_candidate_reused else replay.performance.wall_time_seconds
+        ),
+        selected_candidate_reused=selected_candidate_reused,
+    )
 
 
 def _candidate_execution_plan(
@@ -390,6 +417,54 @@ def _candidate_record(result: CandidateResult) -> dict[str, Any]:
     }
 
 
+def _geometry_performance_record(
+    candidate_snapshot: PerformanceSnapshot | None,
+    export_snapshot: PerformanceSnapshot,
+    *,
+    candidates: Sequence[CandidateResult],
+    candidate_search_wall_time_seconds: float | None,
+    selected_replay_wall_time_seconds: float | None,
+    selected_candidate_reused: bool,
+    total_wall_time_seconds: float,
+) -> dict[str, Any]:
+    stage_seconds = dict(candidate_snapshot.stage_seconds) if candidate_snapshot else {}
+    stage_inclusive_seconds = (
+        dict(candidate_snapshot.stage_inclusive_seconds) if candidate_snapshot else {}
+    )
+    stage_call_counts = dict(candidate_snapshot.stage_call_counts) if candidate_snapshot else {}
+    for name, seconds in export_snapshot.stage_seconds.items():
+        stage_seconds[name] = stage_seconds.get(name, 0.0) + float(seconds)
+    for name, seconds in export_snapshot.stage_inclusive_seconds.items():
+        stage_inclusive_seconds[name] = stage_inclusive_seconds.get(name, 0.0) + float(seconds)
+    for name, count in export_snapshot.stage_call_counts.items():
+        stage_call_counts[name] = stage_call_counts.get(name, 0) + int(count)
+    worker_peaks = [
+        float(result.performance.peak_rss_mib)
+        for result in candidates
+        if result.performance is not None
+    ]
+    candidate_peak = 0.0 if candidate_snapshot is None else candidate_snapshot.peak_rss_mib
+    return {
+        "measurement_scope": (
+            "wall-clock timings through scientific artifact export; visual-report rendering "
+            "and final checksum refresh are excluded"
+        ),
+        "total_wall_time_seconds": float(total_wall_time_seconds),
+        "candidate_search_wall_time_seconds": candidate_search_wall_time_seconds,
+        "selected_replay_wall_time_seconds": selected_replay_wall_time_seconds,
+        "selected_candidate_reused": bool(selected_candidate_reused),
+        "candidate_wall_time_sum_seconds": float(
+            sum(result.wall_time_seconds for result in candidates)
+        ),
+        "stage_timings_seconds": dict(sorted(stage_seconds.items())),
+        "stage_inclusive_seconds": dict(sorted(stage_inclusive_seconds.items())),
+        "stage_call_counts": dict(sorted(stage_call_counts.items())),
+        "rss_start_mib": float(export_snapshot.rss_start_mib),
+        "peak_rss_mib": float(max(export_snapshot.peak_rss_mib, candidate_peak)),
+        "worker_peak_rss_mib": max(worker_peaks) if worker_peaks else None,
+    }
+
+
 def _candidate_identity_record(identity: CandidateIdentity) -> dict[str, int]:
     return {
         "seed": identity.seed,
@@ -425,8 +500,7 @@ def _require_replay_matches_summary(
         or replay.scale != summary.scale
         or replay.phase_grid.porosity != summary.porosity
         or replay.audit.passed != summary.audit_passed
-        or tuple(str(warning) for warning in replay.audit.warnings)
-        != summary.warnings
+        or tuple(str(warning) for warning in replay.audit.warnings) != summary.warnings
     ):
         raise RuntimeError("candidate replay diverged from worker summary")
 
@@ -727,7 +801,10 @@ def _connected_cluster_count(mask: np.ndarray) -> int:
 
 
 def _packmol_interface_mixing_layer_fraction(root: Path) -> float:
-    for path in (root / "inputs" / "normalized_config.yaml", root / "qa_export" / "normalized_config.yaml"):
+    for path in (
+        root / "inputs" / "normalized_config.yaml",
+        root / "qa_export" / "normalized_config.yaml",
+    ):
         if not path.is_file():
             continue
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -912,28 +989,72 @@ def _packing_frame_result(
     )
 
 
-def _write_geometry_artifacts(config: GeneratorConfig, run: GeometryRun) -> None:
-    run.paths.qa_export.mkdir(parents=True, exist_ok=True)
-    for unit in run.built.units:
-        _append_jsonl(run.paths.qa_export / "unit_geometry.jsonl", unit.to_record())
-    run.phase_grid.write_hdf5(run.paths.qa_export / "final_phase.h5")
-    _write_normalized_config(config, run.paths.qa_export / "normalized_config.yaml")
-    _write_final_measurement_artifacts(run)
-    export_surface_ply(run.phase_grid, run.paths.qa_export / "final_surface.ply")
-    run.paths.outputs.mkdir(parents=True, exist_ok=True)
-    export_semiconductor_glb(
-        run.phase_grid,
-        run.paths.outputs / "semiconductor_solid_target.glb",
-        _qa_contract(config, run.phase_grid),
+def _write_geometry_artifacts(
+    config: GeneratorConfig,
+    run: GeometryRun,
+    *,
+    candidate_performance: PerformanceSnapshot | None = None,
+    run_started_at: float | None = None,
+    candidate_search_wall_time_seconds: float | None = None,
+    selected_replay_wall_time_seconds: float | None = None,
+    selected_candidate_reused: bool = False,
+) -> GeometryRun:
+    export_profiler = RuntimeProfiler()
+    with activate_runtime_profiler(export_profiler), profile_stage("export"):
+        run.paths.qa_export.mkdir(parents=True, exist_ok=True)
+        for unit in run.built.units:
+            _append_jsonl(run.paths.qa_export / "unit_geometry.jsonl", unit.to_record())
+        run.phase_grid.write_hdf5(run.paths.qa_export / "final_phase.h5")
+        _write_normalized_config(config, run.paths.qa_export / "normalized_config.yaml")
+        _write_final_measurement_artifacts(run)
+        export_surface_ply(run.phase_grid, run.paths.qa_export / "final_surface.ply")
+        run.paths.outputs.mkdir(parents=True, exist_ok=True)
+        export_semiconductor_glb(
+            run.phase_grid,
+            run.paths.outputs / "semiconductor_solid_target.glb",
+            _qa_contract(config, run.phase_grid),
+        )
+        shutil.copy2(
+            run.paths.outputs / "semiconductor_solid_target.glb",
+            run.paths.qa_export / "semiconductor_solid_target.glb",
+        )
+        _write_pore_geometry_hdf5(config, run)
+        _write_main_metrics(config, run, None)
+        _write_unit_metrics(run.built, run.paths.qa_export / "main_unit_metrics.csv")
+        _write_channel_curves(run.built, run.paths.qa_export / "channel_curves.h5")
+        write_qa_contract(
+            _qa_contract(config, run.phase_grid),
+            run.paths.qa_export,
+        )
+        write_run_report(
+            run.paths.reports / "geometry-report.md",
+            config=config,
+            status="accepted",
+            warnings=list(run.audit.warnings),
+            convergence={
+                "audit_passed": run.audit.passed,
+                "porosity": run.phase_grid.porosity,
+                "target_porosity": config.pores.target_porosity,
+            },
+            output_paths=[run.paths.qa_export / "unit_geometry.jsonl"],
+        )
+
+    performance = _geometry_performance_record(
+        candidate_performance,
+        export_profiler.snapshot(),
+        candidates=run.candidate_results,
+        candidate_search_wall_time_seconds=candidate_search_wall_time_seconds,
+        selected_replay_wall_time_seconds=selected_replay_wall_time_seconds,
+        selected_candidate_reused=selected_candidate_reused,
+        total_wall_time_seconds=(
+            export_profiler.snapshot().wall_time_seconds
+            if run_started_at is None
+            else max(0.0, time.perf_counter() - run_started_at)
+        ),
     )
-    shutil.copy2(
-        run.paths.outputs / "semiconductor_solid_target.glb",
-        run.paths.qa_export / "semiconductor_solid_target.glb",
-    )
-    _write_pore_geometry_hdf5(config, run)
-    _write_main_metrics(config, run, None)
-    _write_unit_metrics(run.built, run.paths.qa_export / "main_unit_metrics.csv")
-    _write_channel_curves(run.built, run.paths.qa_export / "channel_curves.h5")
+    run = replace(run, performance=performance)
+    _write_json(run.paths.qa_export / "performance.json", performance)
+    write_qa_checksums(run.paths.qa_export)
     if config.output.write_plots:
         write_visual_report(
             run.paths.outputs / "visual-report" / "index.html",
@@ -943,24 +1064,9 @@ def _write_geometry_artifacts(config: GeneratorConfig, run: GeometryRun) -> None
             audit=run.audit,
             candidates=run.candidate_results,
             selected_sequence_index=run.selected_candidate.sequence_index,
+            performance=performance,
         )
-    write_qa_contract(
-        _qa_contract(config, run.phase_grid),
-        run.paths.qa_export,
-    )
-    write_qa_checksums(run.paths.qa_export)
-    write_run_report(
-        run.paths.reports / "geometry-report.md",
-        config=config,
-        status="accepted",
-        warnings=list(run.audit.warnings),
-        convergence={
-            "audit_passed": run.audit.passed,
-            "porosity": run.phase_grid.porosity,
-            "target_porosity": config.pores.target_porosity,
-        },
-        output_paths=[run.paths.qa_export / "unit_geometry.jsonl"],
-    )
+    return run
 
 
 def _write_final_measurement_artifacts(run: GeometryRun) -> None:
@@ -993,9 +1099,7 @@ def _write_final_measurement_artifacts(run: GeometryRun) -> None:
             track_group.attrs["touches_z_lower"] = bool(track.touches_z_lower)
             track_group.attrs["touches_z_upper"] = bool(track.touches_z_upper)
             track_group.attrs["is_through"] = bool(track.is_through)
-            track_group.attrs["has_branch_neighborhood"] = bool(
-                track.has_branch_neighborhood
-            )
+            track_group.attrs["has_branch_neighborhood"] = bool(track.has_branch_neighborhood)
 
     fields = [
         "track_id",
@@ -1088,10 +1192,11 @@ def _write_pore_geometry_hdf5(config: GeneratorConfig, run: GeometryRun) -> None
         handle.attrs["target_origin_A"] = config.film.target_origin_in_packing_A
         handle.attrs["final_phase_reference"] = "../qa_export/final_phase.h5"
         records = [
-            json.dumps(_json_ready(unit.to_record()), sort_keys=True)
-            for unit in run.built.units
+            json.dumps(_json_ready(unit.to_record()), sort_keys=True) for unit in run.built.units
         ]
-        handle.create_dataset("unit_records", data=np.asarray(records, dtype=object), dtype=string_dtype)
+        handle.create_dataset(
+            "unit_records", data=np.asarray(records, dtype=object), dtype=string_dtype
+        )
         final_phase = handle.create_group("final_phase")
         final_phase.attrs["authoritative_reference"] = "../qa_export/final_phase.h5"
         final_phase.create_dataset(
@@ -1311,9 +1416,7 @@ def _unit_shape_metrics(unit: CompactUnit | ChannelUnit) -> dict[str, Any]:
                 ),
                 "bend_count": int(unit.bend_count or 0),
                 "nonplanarity": f"{float(unit.nonplanarity or 0.0):.10f}",
-                "minimum_self_clearance_A": (
-                    f"{float(unit.minimum_self_clearance_A or 0.0):.10f}"
-                ),
+                "minimum_self_clearance_A": (f"{float(unit.minimum_self_clearance_A or 0.0):.10f}"),
             }
         )
     return base
@@ -1336,9 +1439,7 @@ def _shape_complexity_summary(built: BuiltGeometry) -> dict[str, Any]:
             "shape_model_counts": _value_counts(
                 metric["shape_model"] for metric in compact_metrics
             ),
-            "lobe_count": _numeric_summary(
-                metric["lobe_count"] for metric in compact_metrics
-            ),
+            "lobe_count": _numeric_summary(metric["lobe_count"] for metric in compact_metrics),
             "envelope_fill_fraction": _numeric_summary(
                 metric["envelope_fill_fraction"] for metric in compact_metrics
             ),
@@ -1346,11 +1447,7 @@ def _shape_complexity_summary(built: BuiltGeometry) -> dict[str, Any]:
                 metric["centroid_offset_A"] for metric in compact_metrics
             ),
             "connected_fraction": (
-                float(
-                    np.mean(
-                        [bool(metric["lobes_connected"]) for metric in compact_metrics]
-                    )
-                )
+                float(np.mean([bool(metric["lobes_connected"]) for metric in compact_metrics]))
                 if compact_metrics
                 else None
             ),
@@ -1360,19 +1457,12 @@ def _shape_complexity_summary(built: BuiltGeometry) -> dict[str, Any]:
             "shape_model_counts": _value_counts(
                 metric["shape_model"] for metric in channel_metrics
             ),
-            "radius_cv": _numeric_summary(
-                metric["radius_cv"] for metric in channel_metrics
-            ),
+            "radius_cv": _numeric_summary(metric["radius_cv"] for metric in channel_metrics),
             "minimum_to_maximum_radius_ratio": _numeric_summary(
-                metric["minimum_to_maximum_radius_ratio"]
-                for metric in channel_metrics
+                metric["minimum_to_maximum_radius_ratio"] for metric in channel_metrics
             ),
-            "bend_count": _numeric_summary(
-                metric["bend_count"] for metric in channel_metrics
-            ),
-            "nonplanarity": _numeric_summary(
-                metric["nonplanarity"] for metric in channel_metrics
-            ),
+            "bend_count": _numeric_summary(metric["bend_count"] for metric in channel_metrics),
+            "nonplanarity": _numeric_summary(metric["nonplanarity"] for metric in channel_metrics),
             "minimum_self_clearance_A": _numeric_summary(
                 metric["minimum_self_clearance_A"] for metric in channel_metrics
             ),
@@ -1701,9 +1791,7 @@ def _run_seed_panel(
             output_dir=paths.outputs,
             seed_panel_summary=aggregate,
         )
-        raise RuntimeError(
-            representative_result.failure_reason or "representative seed failed"
-        )
+        raise RuntimeError(representative_result.failure_reason or "representative seed failed")
 
     representative_paths = task_paths_from_existing_root(Path(representative_result.artifact_root))
     if plan.effective_strategy == "seeds":
@@ -2014,10 +2102,7 @@ def _accepted_for_packing(
         "seed_count scalar error",
         "rdf weighted loss",
     )
-    return not any(
-        any(phrase in warning for phrase in fatal_phrases)
-        for warning in audit.warnings
-    )
+    return not any(any(phrase in warning for phrase in fatal_phrases) for warning in audit.warnings)
 
 
 def _packing_config(config: GeneratorConfig) -> PackingConfig:
@@ -2123,6 +2208,7 @@ def _audit_summary(audit: AuditResult) -> dict[str, Any]:
         ),
         "theta_xz_result": _optional_distribution_summary(audit.theta_xz_result),
         "theta_xy_result": _optional_distribution_summary(audit.theta_xy_result),
+        "paired_orientation_result": audit.paired_orientation_result,
         "curvature_fluctuation_result": _optional_distribution_summary(
             audit.curvature_fluctuation_result
         ),
@@ -2143,6 +2229,9 @@ def _audit_summary(audit: AuditResult) -> dict[str, Any]:
         "z_upper_opening_fraction": audit.z_upper_opening_fraction,
         "minimum_cross_section_fraction": audit.minimum_cross_section_fraction,
         "minimum_cross_section_index": audit.minimum_cross_section_index,
+        "through_pore_domain_count": audit.through_pore_domain_count,
+        "through_centerline_count": audit.through_centerline_count,
+        "valid_through_cross_section_count": audit.valid_through_cross_section_count,
         "local_thickness_stability": {
             "passed": audit.local_thickness_stability_result.passed,
             "max_quantile_error_A": audit.local_thickness_stability_result.max_quantile_error_A,
@@ -2234,8 +2323,7 @@ def _append_jsonl(path: Path, payload: Any) -> None:
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(_json_ready(payload), indent=2, sort_keys=True, separators=(",", ": "))
-        + "\n",
+        json.dumps(_json_ready(payload), indent=2, sort_keys=True, separators=(",", ": ")) + "\n",
         encoding="utf-8",
     )
 

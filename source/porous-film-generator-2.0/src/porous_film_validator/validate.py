@@ -6,8 +6,8 @@ import csv
 import hashlib
 import json
 import math
-from collections import deque
 from dataclasses import dataclass, field
+from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ import yaml
 from scipy import ndimage, stats
 from scipy.interpolate import CubicSpline, PchipInterpolator
 from scipy.optimize import brentq, linear_sum_assignment
+from scipy.spatial.transform import Rotation
 from scipy.special import logsumexp
 from scipy.stats import qmc
 from skimage.feature import peak_local_max
@@ -40,6 +41,12 @@ _V3_GXY_REL_TOLERANCE = 1.0e-6
 _V3_DISTRIBUTION_KS_LIMIT = 0.20
 _V3_DISTRIBUTION_WASSERSTEIN_LIMIT = 0.20
 _V3_RDF_LOSS_LIMIT = 1.0
+_V3_MIXTURE_WEIGHT_ABSOLUTE_TOLERANCE = 0.05
+_V3_COMPACT_ETA_CONSTANT_RELATIVE_TOLERANCE = 0.05
+_V3_CHANNEL_GEOMETRY_CONSTANT_RELATIVE_TOLERANCE = 0.01
+_OVERLAP_CHUNK_SIZE = 250_000
+_SMOOTH_UNION_SHARPNESS = 32.0
+_ROUGHNESS_MODE_COUNT = 4
 
 _CHECKSUM_REQUIRED_FILES = (
     "contract.json",
@@ -129,16 +136,19 @@ def validate_export(qa_export: Path) -> ValidationReport:
     config = _read_yaml(qa / "normalized_config.yaml", errors)
     schema_version = _config_schema_version(config)
     mandatory_entries = (
-        _V3_MANDATORY_EXPORT_ENTRIES
-        if schema_version >= 3
-        else _MANDATORY_EXPORT_ENTRIES
+        _V3_MANDATORY_EXPORT_ENTRIES if schema_version >= 3 else _MANDATORY_EXPORT_ENTRIES
     )
     missing = [entry for entry in mandatory_entries if not (qa / entry).exists()]
     if missing:
         errors.append("mandatory QA export entries are missing: " + ", ".join(missing))
 
     contract = _read_json(qa / "contract.json", errors)
-    phase_metrics, phase_data = _read_phase_metrics(qa / "final_phase.h5", contract, errors)
+    phase_metrics, phase_data = _read_phase_metrics(
+        qa / "final_phase.h5",
+        contract,
+        config,
+        errors,
+    )
     unit_metrics = _read_unit_metrics(
         qa / "unit_geometry.jsonl",
         qa / "channel_curves.h5",
@@ -176,6 +186,7 @@ def validate_export(qa_export: Path) -> ValidationReport:
         config,
         contract,
         phase_metrics,
+        unit_metrics,
         molecule_metrics,
         final_geometry_metrics,
         errors,
@@ -217,6 +228,7 @@ class _V3MeasurementContract:
     branch_exclusion_length_A: float = 2.0
     surface_exclusion_length_A: float = 2.0
     orientation_projection_min_fraction: float = 0.05
+    orientation_aspect_ratio_tolerance: float = 1.0e-6
 
 
 @dataclass(frozen=True)
@@ -292,6 +304,15 @@ class _V3ChannelGeometryMeasurement:
 
 
 @dataclass(frozen=True)
+class _V3CompactGeometryMeasurement:
+    component_id: int
+    voxel_count: int
+    eta: float | None
+    valid: bool
+    invalid_reason: str | None
+
+
+@dataclass(frozen=True)
 class _V3FinalGeometryMeasurements:
     porosity: float
     slice_centers: tuple[_V3SliceCenterRecord, ...]
@@ -302,6 +323,7 @@ class _V3FinalGeometryMeasurements:
     cross_sections: tuple[_V3CrossSectionMeasurement, ...]
     projected_orientations: tuple[_V3ProjectedOrientationMeasurement, ...]
     channel_geometries: tuple[_V3ChannelGeometryMeasurement, ...]
+    compact_geometries: tuple[_V3CompactGeometryMeasurement, ...]
 
 
 @dataclass
@@ -317,6 +339,7 @@ class _V3MutableTrack:
 def _read_phase_metrics(
     path: Path,
     contract: dict[str, Any],
+    config: dict[str, Any],
     errors: list[str],
 ) -> tuple[dict[str, Any], _PhaseData | None]:
     if not path.is_file():
@@ -367,6 +390,12 @@ def _read_phase_metrics(
     pore_components = _periodic_xy_component_count(mask)
     semiconductor = ~mask
     min_cross_section = _minimum_cross_section_fraction(semiconductor)
+    minimum_skeleton_thickness_A = _configured_minimum_skeleton_thickness_A(config)
+    matrix_for_percolation = _matrix_mask_for_percolation(
+        semiconductor,
+        spacing,
+        minimum_skeleton_thickness_A,
+    )
     phase_data = _PhaseData(
         mask=mask,
         spacing_A=spacing,
@@ -382,6 +411,8 @@ def _read_phase_metrics(
         "origin_A": origin.tolist(),
         "connected_pore_components": pore_components,
         "semiconductor_x_percolates": _percolates_x(semiconductor),
+        "matrix_x_percolates": _percolates_x(matrix_for_percolation),
+        "matrix_minimum_skeleton_thickness_A": minimum_skeleton_thickness_A,
         "minimum_semiconductor_cross_section_fraction": min_cross_section,
         "pore_voxels": int(np.count_nonzero(mask)),
         "semiconductor_voxels": int(np.count_nonzero(semiconductor)),
@@ -401,7 +432,11 @@ def _read_unit_metrics(
     compact_count = sum(kind == "compact" for kind in kinds)
     channel_count = sum(kind == "channel" for kind in kinds)
     anchors = np.asarray(
-        [_anchor_from_record(record) for record in records if _anchor_from_record(record) is not None],
+        [
+            _anchor_from_record(record)
+            for record in records
+            if _anchor_from_record(record) is not None
+        ],
         dtype=float,
     ).reshape((-1, 3))
     volume_samples = [
@@ -416,6 +451,11 @@ def _read_unit_metrics(
         if phase is not None and anchors.shape[0] >= 2
         else np.empty(0, dtype=float)
     )
+    overlap_fraction = (
+        _independent_overlap_fraction(records, channel_curves, phase, errors)
+        if phase is not None
+        else math.nan
+    )
     return {
         "total_count": len(records),
         "compact_count": int(compact_count),
@@ -426,6 +466,7 @@ def _read_unit_metrics(
         "volume_std_A3": float(np.std(finite_volumes)) if finite_volumes.size else None,
         "rdf_pair_count": int(distances.size),
         "rdf_distance_mean_A": float(np.mean(distances)) if distances.size else None,
+        "overlap_fraction": overlap_fraction if np.isfinite(overlap_fraction) else None,
     }
 
 
@@ -449,9 +490,7 @@ def _read_channel_curves(
                         samples = np.asarray(item["centerline_A"], dtype=float)
                         radii = np.asarray(item["radius_A"], dtype=float)
                     except (KeyError, ValueError, TypeError) as exc:
-                        errors.append(
-                            f"channel_curves.h5 group {unit_id} is invalid: {exc}"
-                        )
+                        errors.append(f"channel_curves.h5 group {unit_id} is invalid: {exc}")
                         continue
                     item_schema = max(schema_version, 2)
                 else:
@@ -510,7 +549,7 @@ def _read_channel_curves(
 
 def _config_schema_version(config: dict[str, Any]) -> int:
     try:
-        return int(config.get("schema_version", 1))
+        return int(config.get("source_schema_version", config.get("schema_version", 1)))
     except (TypeError, ValueError):
         return 1
 
@@ -546,9 +585,7 @@ def _read_v3_final_geometry_metrics(
     )
 
     inside_fraction = (
-        centerline_points_inside / centerline_point_count
-        if centerline_point_count
-        else math.nan
+        centerline_points_inside / centerline_point_count if centerline_point_count else math.nan
     )
     if np.isfinite(inside_fraction) and inside_fraction < 0.95:
         errors.append("reported final centerline points are not contained in final pore phase")
@@ -557,6 +594,7 @@ def _read_v3_final_geometry_metrics(
     formal_samples = _v3_formal_measurement_samples(rebuilt)
     return {
         "through_network_count": through_network_count,
+        "connected_pore_component_count": _periodic_xy_component_count(phase.mask),
         "rebuilt_centerline_count": len(rebuilt.centerlines),
         "rebuilt_through_centerline_count": rebuilt.through_centerline_count,
         "rebuilt_branch_event_count": rebuilt.branch_event_count,
@@ -583,6 +621,9 @@ def _read_v3_final_geometry_metrics(
         "rebuilt_valid_channel_geometry_count": int(
             sum(channel.valid for channel in rebuilt.channel_geometries)
         ),
+        "rebuilt_valid_compact_geometry_count": int(
+            sum(compact.valid for compact in rebuilt.compact_geometries)
+        ),
         "rebuilt_center_distance_xy": {
             "bin_centers_A": rebuilt.center_distance_xy.bin_centers_A.tolist(),
             "g_xy": rebuilt.center_distance_xy.g_xy.tolist(),
@@ -591,18 +632,14 @@ def _read_v3_final_geometry_metrics(
             "pair_count": rebuilt.center_distance_xy.pair_count,
             "valid_slice_count": rebuilt.center_distance_xy.valid_slice_count,
         },
-        "rebuilt_formal_samples": {
-            key: values.tolist() for key, values in formal_samples.items()
-        },
+        "rebuilt_formal_samples": {key: values.tolist() for key, values in formal_samples.items()},
     }
 
 
 def _v3_formal_measurement_samples(
     rebuilt: _V3FinalGeometryMeasurements,
 ) -> dict[str, np.ndarray]:
-    through_ids = {
-        track.track_id for track in rebuilt.centerlines if track.is_through
-    }
+    through_ids = {track.track_id for track in rebuilt.centerlines if track.is_through}
     return {
         "equivalent_diameter_A": np.asarray(
             [
@@ -646,12 +683,30 @@ def _v3_formal_measurement_samples(
             [
                 float(value.tortuosity)
                 for value in rebuilt.channel_geometries
-                if value.track_id in through_ids
-                and value.valid
-                and value.tortuosity is not None
+                if value.track_id in through_ids and value.valid and value.tortuosity is not None
             ],
             dtype=float,
         ),
+        "compact_eta": np.asarray(
+            [
+                float(value.eta)
+                for value in rebuilt.compact_geometries
+                if value.valid and value.eta is not None
+            ],
+            dtype=float,
+        ),
+        "paired_orientation": np.asarray(
+            [
+                [float(value.theta_xz_deg), float(value.theta_xy_deg)]
+                for value in rebuilt.projected_orientations
+                if value.track_id in through_ids
+                and value.theta_xz_identifiable
+                and value.theta_xy_identifiable
+                and value.theta_xz_deg is not None
+                and value.theta_xy_deg is not None
+            ],
+            dtype=float,
+        ).reshape((-1, 2)),
         "curvature_fluctuation": np.asarray(
             [
                 float(section.curvature_fluctuation)
@@ -670,8 +725,16 @@ def _v3_measurement_contract(
     config: dict[str, Any],
     errors: list[str],
 ) -> _V3MeasurementContract:
-    raw = config.get("measurement", {})
-    raw = raw if isinstance(raw, dict) else {}
+    configured_measurement = config.get("measurement", {})
+    raw = dict(configured_measurement) if isinstance(configured_measurement, dict) else {}
+    if "orientation_aspect_ratio_tolerance" not in raw:
+        for legacy_key in ("audit", "geometry_audit"):
+            legacy = config.get(legacy_key)
+            if isinstance(legacy, dict) and "orientation_aspect_ratio_tolerance" in legacy:
+                raw["orientation_aspect_ratio_tolerance"] = legacy[
+                    "orientation_aspect_ratio_tolerance"
+                ]
+                break
     return _V3MeasurementContract(
         z_slice_spacing_A=_v3_positive_float(raw, "z_slice_spacing_A", 1.0, errors),
         center_min_separation_A=_v3_positive_float(
@@ -743,6 +806,12 @@ def _v3_measurement_contract(
             raw,
             "orientation_projection_min_fraction",
             0.05,
+            errors,
+        ),
+        orientation_aspect_ratio_tolerance=_v3_nonnegative_float(
+            raw,
+            "orientation_aspect_ratio_tolerance",
+            1.0e-6,
             errors,
         ),
     )
@@ -852,9 +921,7 @@ def _compare_v3_centerline_h5(
             for track in rebuilt.centerlines:
                 track_name = str(track.track_id)
                 if track_name not in group:
-                    errors.append(
-                        f"final_centerlines.h5 missing rebuilt track {track.track_id}"
-                    )
+                    errors.append(f"final_centerlines.h5 missing rebuilt track {track.track_id}")
                     continue
                 track_group = group[track_name]
                 points = np.asarray(
@@ -863,8 +930,7 @@ def _compare_v3_centerline_h5(
                 )
                 if points.ndim != 2 or points.shape[1:] != (3,):
                     errors.append(
-                        f"final_centerlines.h5 track {track.track_id} "
-                        "points must have shape (n, 3)"
+                        f"final_centerlines.h5 track {track.track_id} points must have shape (n, 3)"
                     )
                     continue
                 point_count += int(points.shape[0])
@@ -1026,6 +1092,7 @@ def _compare_v3_final_measurements_json(
         "cross_sections",
         "projected_orientations",
         "channel_geometries",
+        "compact_geometries",
     }
     if not reported:
         errors.append("final_measurements.json is empty or missing required schema-v3 measurements")
@@ -1068,6 +1135,59 @@ def _compare_v3_final_measurements_json(
         rebuilt.channel_geometries,
         errors,
     )
+    _compare_v3_json_compacts(
+        reported.get("compact_geometries"),
+        rebuilt.compact_geometries,
+        errors,
+    )
+
+
+def _compare_v3_json_compacts(
+    reported: Any,
+    rebuilt: tuple[_V3CompactGeometryMeasurement, ...],
+    errors: list[str],
+) -> None:
+    records = reported if isinstance(reported, list) else []
+    if len(records) != len(rebuilt):
+        errors.append(
+            "final_measurements.json compact geometry count does not match independent "
+            f"final_phase reconstruction: reported={len(records)}, rebuilt={len(rebuilt)}"
+        )
+    for index, (record, expected) in enumerate(zip(records, rebuilt, strict=False)):
+        if not isinstance(record, dict):
+            errors.append(f"final_measurements.json compact_geometries[{index}] is invalid")
+            continue
+        _v3_compare_int(
+            errors,
+            f"final_measurements.json compact_geometries[{index}] component_id",
+            record.get("component_id"),
+            expected.component_id,
+        )
+        _v3_compare_int(
+            errors,
+            f"final_measurements.json compact_geometries[{index}] voxel_count",
+            record.get("voxel_count"),
+            expected.voxel_count,
+        )
+        _v3_compare_optional_scalar(
+            errors,
+            f"final_measurements.json compact_geometries[{index}] eta",
+            _optional_float(record.get("eta")),
+            expected.eta,
+        )
+        _v3_compare_bool(
+            errors,
+            f"final_measurements.json compact_geometries[{index}] valid",
+            record.get("valid"),
+            expected.valid,
+        )
+        if record.get("invalid_reason") != expected.invalid_reason:
+            errors.append(
+                "final_measurements.json "
+                f"compact_geometries[{index}] invalid_reason does not match independent "
+                f"final_phase reconstruction: reported={record.get('invalid_reason')!r}, "
+                f"rebuilt={expected.invalid_reason!r}"
+            )
 
 
 def _compare_v3_json_slice_centers(
@@ -1081,9 +1201,7 @@ def _compare_v3_json_slice_centers(
             "final_measurements.json slice_centers count does not match independent "
             f"final_phase reconstruction: reported={len(records)}, rebuilt={len(rebuilt.slice_centers)}"
         )
-    for index, (record, expected) in enumerate(
-        zip(records, rebuilt.slice_centers, strict=False)
-    ):
+    for index, (record, expected) in enumerate(zip(records, rebuilt.slice_centers, strict=False)):
         name = f"final_measurements.json slice_centers[{index}]"
         _v3_compare_int(errors, f"{name} z_index", record.get("z_index"), expected.z_index)
         _v3_compare_scalar(
@@ -1226,9 +1344,7 @@ def _compare_v3_json_cross_sections(
             "final_measurements.json cross_sections count does not match independent "
             f"final_phase reconstruction: reported={len(records)}, rebuilt={len(rebuilt.cross_sections)}"
         )
-    for index, (record, section) in enumerate(
-        zip(records, rebuilt.cross_sections, strict=False)
-    ):
+    for index, (record, section) in enumerate(zip(records, rebuilt.cross_sections, strict=False)):
         name = f"final_measurements.json cross_sections[{index}]"
         _v3_compare_int(errors, f"{name} track_id", record.get("track_id"), section.track_id)
         _v3_compare_scalar(
@@ -1491,8 +1607,7 @@ def _v3_measure_final_geometry(
         contract.z_slice_spacing_A,
     )
     slices = tuple(
-        _v3_measure_slice_centers(phase, int(z_index), contract)
-        for z_index in sampled_indices
+        _v3_measure_slice_centers(phase, int(z_index), contract) for z_index in sampled_indices
     )
     centerlines, branch_count, branch_z_by_track = _v3_track_slice_centers(
         slices,
@@ -1508,22 +1623,44 @@ def _v3_measure_final_geometry(
         maximum_distance_A=contract.center_distance_max_A,
         reference_samples=contract.center_distance_reference_samples,
     )
+    sampled_centerlines = {
+        track.track_id: _v3_resample_centerline(
+            _v3_smoothed_track_points(track.points_unwrapped_A),
+            track.wall_distances_A,
+            sample_spacing_A=contract.centerline_sample_spacing_A,
+        )
+        for track in centerlines
+    }
     cross_sections = _v3_measure_normal_cross_sections(
         phase,
         centerlines,
         contract,
         branch_z_by_track=branch_z_by_track,
+        sampled_centerlines=sampled_centerlines,
     )
+    channel_geometries = tuple(
+        _v3_channel_geometry(
+            track,
+            cross_sections,
+            centerline_points_A=sampled_centerlines[track.track_id][0],
+        )
+        for track in centerlines
+    )
+    channel_geometry_by_track = {value.track_id: value for value in channel_geometries}
     projected_orientations = tuple(
         _v3_projected_orientation(
             track,
             minimum_projection_fraction=contract.orientation_projection_min_fraction,
+            channel_aspect_ratio=(
+                channel_geometry_by_track[track.track_id].eta
+                if channel_geometry_by_track[track.track_id].valid
+                else None
+            ),
+            aspect_ratio_tolerance=contract.orientation_aspect_ratio_tolerance,
         )
         for track in centerlines
     )
-    channel_geometries = tuple(
-        _v3_channel_geometry(track, cross_sections) for track in centerlines
-    )
+    compact_geometries = _v3_measure_compact_geometries(phase)
     return _V3FinalGeometryMeasurements(
         porosity=float(np.mean(phase.mask)),
         slice_centers=slices,
@@ -1534,13 +1671,96 @@ def _v3_measure_final_geometry(
         cross_sections=cross_sections,
         projected_orientations=projected_orientations,
         channel_geometries=channel_geometries,
+        compact_geometries=compact_geometries,
     )
+
+
+def _v3_measure_compact_geometries(
+    phase: _PhaseData,
+) -> tuple[_V3CompactGeometryMeasurement, ...]:
+    labels, label_count = ndimage.label(
+        phase.mask,
+        structure=_six_connected_structure(),
+    )
+    if label_count == 0:
+        return ()
+    parents = np.arange(label_count + 1, dtype=int)
+    for first, second in zip(labels[:, :, 0].ravel(), labels[:, :, -1].ravel(), strict=True):
+        _union_labels(int(first), int(second), parents)
+    for first, second in zip(labels[:, 0, :].ravel(), labels[:, -1, :].ravel(), strict=True):
+        _union_labels(int(first), int(second), parents)
+    roots = np.zeros(label_count + 1, dtype=int)
+    for label in range(1, label_count + 1):
+        roots[label] = _find(label, parents)
+    rooted = roots[labels]
+    lower_roots = {int(value) for value in np.unique(rooted[0]) if int(value) != 0}
+    upper_roots = {int(value) for value in np.unique(rooted[-1]) if int(value) != 0}
+
+    output: list[_V3CompactGeometryMeasurement] = []
+    for component_id, root in enumerate(sorted(set(roots[1:])), start=1):
+        if root in lower_roots or root in upper_roots:
+            continue
+        indices_zyx = np.argwhere(rooted == root)
+        if indices_zyx.shape[0] < 4:
+            output.append(
+                _V3CompactGeometryMeasurement(
+                    component_id=component_id,
+                    voxel_count=int(indices_zyx.shape[0]),
+                    eta=None,
+                    valid=False,
+                    invalid_reason="insufficient_component_voxels",
+                )
+            )
+            continue
+        indices_xyz = indices_zyx[:, [2, 1, 0]].astype(float)
+        indices_xyz[:, 0] = _v3_unwrap_periodic_indices(indices_xyz[:, 0], phase.mask.shape[2])
+        indices_xyz[:, 1] = _v3_unwrap_periodic_indices(indices_xyz[:, 1], phase.mask.shape[1])
+        points_A = phase.origin_A + (indices_xyz + 0.5) * phase.spacing_A
+        centered = points_A - np.mean(points_A, axis=0)
+        covariance = centered.T @ centered / float(points_A.shape[0])
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        projected = centered @ eigenvectors[:, np.argsort(eigenvalues)[::-1]]
+        extents = np.ptp(projected, axis=0) + float(phase.spacing_A)
+        if np.any(extents <= 0.0) or not np.all(np.isfinite(extents)):
+            output.append(
+                _V3CompactGeometryMeasurement(
+                    component_id=component_id,
+                    voxel_count=int(indices_zyx.shape[0]),
+                    eta=None,
+                    valid=False,
+                    invalid_reason="invalid_principal_extents",
+                )
+            )
+            continue
+        eta = float(extents[0] / np.sqrt(extents[1] * extents[2]))
+        output.append(
+            _V3CompactGeometryMeasurement(
+                component_id=component_id,
+                voxel_count=int(indices_zyx.shape[0]),
+                eta=max(eta, 1.0),
+                valid=True,
+                invalid_reason=None,
+            )
+        )
+    return tuple(output)
+
+
+def _v3_unwrap_periodic_indices(values: np.ndarray, size: int) -> np.ndarray:
+    wrapped = np.asarray(values, dtype=float)
+    unique = np.unique(wrapped.astype(int))
+    if unique.size < 2:
+        return wrapped.copy()
+    cyclic = np.concatenate((unique, unique[:1] + int(size)))
+    cut = int(unique[(int(np.argmax(np.diff(cyclic))) + 1) % unique.size])
+    return np.where(wrapped < cut, wrapped + int(size), wrapped)
 
 
 def _v3_projected_orientation(
     track: _V3CenterlineTrack,
     *,
     minimum_projection_fraction: float,
+    channel_aspect_ratio: float | None = None,
+    aspect_ratio_tolerance: float = 0.0,
 ) -> _V3ProjectedOrientationMeasurement:
     invalid_axis = np.array([np.nan, np.nan, np.nan])
     if track.points_unwrapped_A.shape[0] < 2:
@@ -1564,19 +1784,27 @@ def _v3_projected_orientation(
             theta_xy_identifiable=False,
         )
     axis = axis / norm
+    if (
+        channel_aspect_ratio is not None
+        and channel_aspect_ratio <= 1.0 + float(aspect_ratio_tolerance)
+    ):
+        return _V3ProjectedOrientationMeasurement(
+            track_id=track.track_id,
+            axis=axis,
+            theta_xz_deg=None,
+            theta_xy_deg=None,
+            theta_xz_identifiable=False,
+            theta_xy_identifiable=False,
+        )
     xz_projection = float(np.hypot(axis[0], axis[2]))
     xy_projection = float(np.hypot(axis[0], axis[1]))
     xz_identifiable = xz_projection >= float(minimum_projection_fraction)
     xy_identifiable = xy_projection >= float(minimum_projection_fraction)
     theta_xz = (
-        float(np.degrees(np.arctan2(abs(axis[2]), abs(axis[0]))))
-        if xz_identifiable
-        else None
+        float(np.degrees(np.arctan2(abs(axis[2]), abs(axis[0])))) if xz_identifiable else None
     )
     theta_xy = (
-        float(np.degrees(np.arctan2(abs(axis[1]), abs(axis[0]))))
-        if xy_identifiable
-        else None
+        float(np.degrees(np.arctan2(abs(axis[1]), abs(axis[0])))) if xy_identifiable else None
     )
     return _V3ProjectedOrientationMeasurement(
         track_id=track.track_id,
@@ -1591,22 +1819,20 @@ def _v3_projected_orientation(
 def _v3_channel_geometry(
     track: _V3CenterlineTrack,
     cross_sections: tuple[_V3CrossSectionMeasurement, ...],
+    *,
+    centerline_points_A: np.ndarray,
 ) -> _V3ChannelGeometryMeasurement:
     if track.has_branch_neighborhood:
         return _v3_invalid_channel_geometry(track.track_id, "branch_neighborhood")
-    if track.points_unwrapped_A.shape[0] < 2:
+    if centerline_points_A.shape[0] < 2:
         return _v3_invalid_channel_geometry(track.track_id, "insufficient_centerline_points")
-    segment_lengths = np.linalg.norm(np.diff(track.points_unwrapped_A, axis=0), axis=1)
+    segment_lengths = np.linalg.norm(np.diff(centerline_points_A, axis=0), axis=1)
     arc_length = float(np.sum(segment_lengths))
-    end_distance = float(
-        np.linalg.norm(track.points_unwrapped_A[-1] - track.points_unwrapped_A[0])
-    )
+    end_distance = float(np.linalg.norm(centerline_points_A[-1] - centerline_points_A[0]))
     valid_sections = [
         section
         for section in cross_sections
-        if section.track_id == track.track_id
-        and section.valid
-        and section.area_A2 is not None
+        if section.track_id == track.track_id and section.valid and section.area_A2 is not None
     ]
     if not valid_sections:
         return _v3_invalid_channel_geometry(track.track_id, "no_valid_cross_sections")
@@ -1648,10 +1874,11 @@ def _v3_measure_normal_cross_sections(
     contract: _V3MeasurementContract,
     *,
     branch_z_by_track: dict[int, np.ndarray],
+    sampled_centerlines: dict[int, tuple[np.ndarray, np.ndarray]],
 ) -> tuple[_V3CrossSectionMeasurement, ...]:
     output: list[_V3CrossSectionMeasurement] = []
     for track in tracks:
-        points = _v3_smoothed_track_points(track.points_unwrapped_A)
+        points, wall_distances = sampled_centerlines[track.track_id]
         if points.shape[0] < 2:
             continue
         segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
@@ -1680,7 +1907,7 @@ def _v3_measure_normal_cross_sections(
         for arc_position in positions:
             center, tangent, wall_distance = _v3_interpolate_track(
                 points,
-                track.wall_distances_A,
+                wall_distances,
                 cumulative,
                 float(arc_position),
             )
@@ -1719,14 +1946,43 @@ def _v3_smoothed_track_points(points_A: np.ndarray) -> np.ndarray:
     if points.shape[0] < 4:
         return points.copy()
     smoothed = np.column_stack(
-        [
-            ndimage.gaussian_filter1d(points[:, axis], sigma=1.0, mode="nearest")
-            for axis in range(3)
-        ]
+        [ndimage.gaussian_filter1d(points[:, axis], sigma=0.5, mode="nearest") for axis in range(3)]
     )
     smoothed[0] = points[0]
     smoothed[-1] = points[-1]
     return smoothed
+
+
+def _v3_resample_centerline(
+    points_A: np.ndarray,
+    wall_distances_A: np.ndarray,
+    *,
+    sample_spacing_A: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    points = np.asarray(points_A, dtype=float)
+    walls = np.asarray(wall_distances_A, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or walls.shape != (points.shape[0],):
+        raise ValueError("centerline points and wall distances must have matching lengths")
+    if points.shape[0] < 2:
+        return points.copy(), walls.copy()
+    segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    keep = np.concatenate(([True], segment_lengths > 1.0e-12))
+    points = points[keep]
+    walls = walls[keep]
+    if points.shape[0] < 2:
+        return points.copy(), walls.copy()
+    cumulative = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))))
+    total_length = float(cumulative[-1])
+    positions = np.arange(0.0, total_length, float(sample_spacing_A), dtype=float)
+    if positions.size == 0 or total_length - positions[-1] > 1.0e-12:
+        positions = np.append(positions, total_length)
+    else:
+        positions[-1] = total_length
+    sampled_points = np.column_stack(
+        [np.interp(positions, cumulative, points[:, axis]) for axis in range(3)]
+    )
+    sampled_walls = np.interp(positions, cumulative, walls)
+    return sampled_points, sampled_walls
 
 
 def _v3_interpolate_track(
@@ -1990,14 +2246,10 @@ def _v3_closed_curve_curvature_fluctuation(
             ]
         )
     step = perimeter / sample_count
-    first = (np.roll(sampled, -1, axis=0) - np.roll(sampled, 1, axis=0)) / (
-        2.0 * step
+    first = (np.roll(sampled, -1, axis=0) - np.roll(sampled, 1, axis=0)) / (2.0 * step)
+    second = (np.roll(sampled, -1, axis=0) - 2.0 * sampled + np.roll(sampled, 1, axis=0)) / (
+        step**2
     )
-    second = (
-        np.roll(sampled, -1, axis=0)
-        - 2.0 * sampled
-        + np.roll(sampled, 1, axis=0)
-    ) / (step**2)
     denominator = np.maximum(np.sum(first**2, axis=1) ** 1.5, 1.0e-12)
     curvature = (first[:, 0] * second[:, 1] - first[:, 1] * second[:, 0]) / denominator
     mean_curvature = float(np.mean(curvature))
@@ -2222,8 +2474,7 @@ def _v3_periodic_slice_centers(
     accepted: list[_V3SliceCenter] = []
     for wall_distance, xy in candidates:
         if any(
-            _v3_periodic_xy_distance(xy, center.xy_A, box_xy)
-            <= minimum_separation_A + 1.0e-12
+            _v3_periodic_xy_distance(xy, center.xy_A, box_xy) <= minimum_separation_A + 1.0e-12
             for center in accepted
         ):
             continue
@@ -2511,16 +2762,8 @@ def _through_z_network_count(mask: np.ndarray) -> int:
             _union_labels(labels[z_index, y_index, 0], labels[z_index, y_index, -1], parent)
         for x_index in range(mask.shape[2]):
             _union_labels(labels[z_index, 0, x_index], labels[z_index, -1, x_index], parent)
-    lower = {
-        _find(int(label), parent)
-        for label in np.unique(labels[0])
-        if int(label) != 0
-    }
-    upper = {
-        _find(int(label), parent)
-        for label in np.unique(labels[-1])
-        if int(label) != 0
-    }
+    lower = {_find(int(label), parent) for label in np.unique(labels[0]) if int(label) != 0}
+    upper = {_find(int(label), parent) for label in np.unique(labels[-1]) if int(label) != 0}
     return len(lower & upper)
 
 
@@ -2698,9 +2941,7 @@ def _scene_mesh(scene: trimesh.Scene) -> trimesh.Trimesh | None:
 def _occupancy_sample_indices(total: int) -> np.ndarray:
     if total <= _GLB_OCCUPANCY_MAX_SAMPLES:
         return np.arange(total, dtype=np.int64)
-    return np.unique(
-        np.linspace(0, total - 1, _GLB_OCCUPANCY_MAX_SAMPLES, dtype=np.int64)
-    )
+    return np.unique(np.linspace(0, total - 1, _GLB_OCCUPANCY_MAX_SAMPLES, dtype=np.int64))
 
 
 def _voxel_centers_for_indices(phase: _PhaseData, indices: np.ndarray) -> np.ndarray:
@@ -2827,17 +3068,11 @@ def _verify_checksums(
 
 
 def _required_checksum_files(qa: Path, *, schema_version: int = 1) -> set[str]:
-    required = set(
-        _V3_CHECKSUM_REQUIRED_FILES
-        if schema_version >= 3
-        else _CHECKSUM_REQUIRED_FILES
-    )
+    required = set(_V3_CHECKSUM_REQUIRED_FILES if schema_version >= 3 else _CHECKSUM_REQUIRED_FILES)
     source_dir = qa / "molecules" / "source"
     if source_dir.is_dir():
         required.update(
-            path.relative_to(qa).as_posix()
-            for path in source_dir.rglob("*")
-            if path.is_file()
+            path.relative_to(qa).as_posix() for path in source_dir.rglob("*") if path.is_file()
         )
     return required
 
@@ -2846,6 +3081,7 @@ def _target_compliance(
     config: dict[str, Any],
     contract: dict[str, Any],
     phase: dict[str, Any],
+    units: dict[str, Any],
     molecules: dict[str, Any],
     final_geometry: dict[str, Any],
     errors: list[str],
@@ -2867,7 +3103,12 @@ def _target_compliance(
     )
     realized_porosity = float(phase.get("porosity", math.nan))
     porosity_error = abs(realized_porosity - target_porosity)
-    porosity_ok = bool(np.isfinite(porosity_error) and porosity_error <= _POROSITY_TARGET_TOLERANCE)
+    voxel_count = int(phase.get("pore_voxels", 0)) + int(phase.get("semiconductor_voxels", 0))
+    porosity_tolerance = max(
+        _POROSITY_TARGET_TOLERANCE,
+        1.0 / voxel_count if voxel_count > 0 else 0.0,
+    )
+    porosity_ok = bool(np.isfinite(porosity_error) and porosity_error <= porosity_tolerance)
     molecule_required = isinstance(config.get("pore_material"), dict)
     expected_count = _nested_int(config, ["pore_material", "molecule_count"])
     molecule_count_match = (
@@ -2879,9 +3120,7 @@ def _target_compliance(
     realized_density = _optional_float(molecules.get("density_g_cm3"))
     density_relative_error = (
         abs(realized_density - target_density) / target_density
-        if np.isfinite(target_density)
-        and target_density > 0.0
-        and np.isfinite(realized_density)
+        if np.isfinite(target_density) and target_density > 0.0 and np.isfinite(realized_density)
         else math.nan
     )
     density_ok = bool(
@@ -2916,7 +3155,7 @@ def _target_compliance(
         "target_porosity": target_porosity,
         "realized_porosity": realized_porosity,
         "porosity_absolute_error": porosity_error,
-        "porosity_tolerance": _POROSITY_TARGET_TOLERANCE,
+        "porosity_tolerance": porosity_tolerance,
         "porosity_within_tolerance": porosity_ok,
         "molecule_count_match": bool(molecule_count_match),
         "target_density_g_cm3": target_density if np.isfinite(target_density) else None,
@@ -2931,6 +3170,8 @@ def _target_compliance(
         compliance.update(
             _v3_target_compliance(
                 config,
+                phase,
+                units,
                 final_geometry,
                 errors,
             )
@@ -2940,6 +3181,8 @@ def _target_compliance(
 
 def _v3_target_compliance(
     config: dict[str, Any],
+    phase: dict[str, Any],
+    units: dict[str, Any],
     final_geometry: dict[str, Any],
     errors: list[str],
 ) -> dict[str, Any]:
@@ -2947,6 +3190,9 @@ def _v3_target_compliance(
     samples = samples if isinstance(samples, dict) else {}
     shape = config.get("formal_targets", {}).get("shape", {})
     shape = shape if isinstance(shape, dict) else {}
+    pore = config.get("pore_constraints", {})
+    pore = pore if isinstance(pore, dict) else {}
+    evaluate_through_targets = str(pore.get("z_connectivity", "unrestricted")) == "all_components"
     output: dict[str, Any] = {}
     distribution_specs = {
         "equivalent_diameter_A": shape.get("equivalent_diameter_A"),
@@ -2958,6 +3204,7 @@ def _v3_target_compliance(
             shape.get("orientation"),
             "theta_xy_deg",
         ),
+        "compact_eta": shape.get("compact_aspect_ratio"),
         "channel_eta": shape.get("channel_aspect_ratio"),
         "channel_tau": shape.get("channel_tortuosity"),
         "curvature_fluctuation": shape.get("curvature_fluctuation"),
@@ -2966,42 +3213,116 @@ def _v3_target_compliance(
         "equivalent_diameter_A": "equivalent_diameter_A",
         "theta_xz_deg": "theta_xz_deg",
         "theta_xy_deg": "theta_xy_deg",
+        "compact_eta": "compact_eta",
         "channel_eta": "channel_eta",
         "channel_tau": "channel_tau",
         "curvature_fluctuation": "curvature_fluctuation",
     }
+    through_dependent_names = {
+        "equivalent_diameter_A",
+        "theta_xz_deg",
+        "theta_xy_deg",
+        "channel_eta",
+        "channel_tau",
+        "curvature_fluctuation",
+    }
     for name, target in distribution_specs.items():
-        result = _v3_distribution_target_result(
-            np.asarray(samples.get(sample_keys[name], []), dtype=float),
-            target,
-            constant_relative_tolerance=(
-                0.01 if name in {"channel_eta", "channel_tau"} else None
-            ),
+        sample_values = np.asarray(samples.get(sample_keys[name], []), dtype=float)
+        evaluated = bool(
+            target is not None
+            and (name not in through_dependent_names or evaluate_through_targets)
         )
+        result = (
+            _v3_distribution_target_result(
+                sample_values,
+                target,
+                constant_relative_tolerance=(
+                    _V3_COMPACT_ETA_CONSTANT_RELATIVE_TOLERANCE
+                    if name == "compact_eta"
+                    else _V3_CHANNEL_GEOMETRY_CONSTANT_RELATIVE_TOLERANCE
+                    if name in {"channel_eta", "channel_tau"}
+                    else None
+                ),
+            )
+            if evaluated
+            else {
+                "passed": None,
+                "sample_count": int(_v3_finite_1d(sample_values).size),
+                "ks": None,
+                "normalized_wasserstein": None,
+            }
+        )
+        output[f"{name}_evaluated"] = evaluated
         output[f"{name}_within_tolerance"] = result["passed"]
         output[f"{name}_sample_count"] = result["sample_count"]
         output[f"{name}_ks"] = result["ks"]
         output[f"{name}_normalized_wasserstein"] = result["normalized_wasserstein"]
-        if not result["passed"]:
+        if evaluated and not result["passed"]:
             errors.append(
                 f"schema-v3 target {name} does not match independent final_phase "
                 f"measurements: sample_count={result['sample_count']}, "
                 f"ks={result['ks']}, "
                 f"normalized_wasserstein={result['normalized_wasserstein']}"
             )
+    orientation_target = shape.get("orientation")
+    paired_evaluated = bool(orientation_target is not None and evaluate_through_targets)
+    paired_result = (
+        _v3_compare_paired_orientation_pairs(
+            np.asarray(samples.get("paired_orientation", []), dtype=float).reshape((-1, 2)),
+            orientation_target,
+        )
+        if paired_evaluated
+        else None
+    )
+    output["paired_orientation_evaluated"] = paired_evaluated
+    if not paired_evaluated or paired_result is None:
+        output["paired_orientation_within_tolerance"] = None
+        output["paired_orientation_sample_count"] = 0
+        output["paired_orientation_unassigned_pair_count"] = 0
+        output["paired_orientation_component_count_errors"] = {}
+    else:
+        output["paired_orientation_within_tolerance"] = paired_result["passed"]
+        output["paired_orientation_sample_count"] = paired_result["sample_count"]
+        output["paired_orientation_unassigned_pair_count"] = paired_result["unassigned_pair_count"]
+        output["paired_orientation_component_count_errors"] = paired_result[
+            "component_count_errors"
+        ]
+        if not paired_result["passed"]:
+            errors.append(
+                "schema-v3 target paired orientation does not match independent "
+                "final_phase measurements"
+            )
     center_result = _v3_center_distance_target_compliance(
         config,
         final_geometry,
     )
-    output["g_xy_within_tolerance"] = center_result["passed"]
-    output["g_xy_weighted_loss"] = center_result["weighted_loss"]
+    center_target = (
+        config.get("formal_targets", {}).get("position_quantity", {}).get("center_distance_xy")
+    )
+    center_evaluated = bool(isinstance(center_target, dict) and evaluate_through_targets)
+    output["g_xy_evaluated"] = center_evaluated
+    output["g_xy_within_tolerance"] = (
+        bool(center_result["passed"]) if center_evaluated else None
+    )
+    output["g_xy_weighted_loss"] = (
+        center_result["weighted_loss"] if center_evaluated else None
+    )
     output["g_xy_pair_count"] = center_result["pair_count"]
-    if not center_result["passed"]:
+    if center_evaluated and not center_result["passed"]:
         errors.append(
             "schema-v3 target g_xy does not match independent final_phase "
             f"measurements: weighted_loss={center_result['weighted_loss']}, "
             f"pair_count={center_result['pair_count']}"
         )
+    output.update(
+        _v3_constraint_compliance(
+            config,
+            phase,
+            units,
+            final_geometry,
+            errors,
+        )
+    )
     return output
 
 
@@ -3032,8 +3353,7 @@ def _v3_distribution_target_result(
     wasserstein = float(stats.wasserstein_distance(sample_values, target_values))
     normalized = wasserstein / _v3_distribution_scale(target_values, target_dict)
     passed = bool(
-        ks <= _V3_DISTRIBUTION_KS_LIMIT
-        and normalized <= _V3_DISTRIBUTION_WASSERSTEIN_LIMIT
+        ks <= _V3_DISTRIBUTION_KS_LIMIT and normalized <= _V3_DISTRIBUTION_WASSERSTEIN_LIMIT
     )
     if constant_relative_tolerance is not None and target_dict.get("family") == "constant":
         target_value = float(target_dict["value"])
@@ -3079,34 +3399,6 @@ def _v3_distribution_cdf(values: np.ndarray, target: dict[str, Any]) -> np.ndarr
     family = str(target.get("family", "constant")).lower()
     if family == "constant":
         return (values >= float(target.get("value", 0.0))).astype(float)
-    if family == "uniform":
-        lower = float(target.get("lower", target.get("minimum", 0.0)))
-        upper = float(target.get("upper", target.get("maximum", lower + 1.0)))
-        return stats.uniform(loc=lower, scale=max(upper - lower, 1.0e-12)).cdf(values)
-    if family == "normal":
-        return stats.norm(
-            loc=float(target.get("mean", target.get("mu", 0.0))),
-            scale=max(float(target.get("sigma", target.get("s", 1.0))), 1.0e-12),
-        ).cdf(values)
-    if family == "lognormal":
-        return stats.lognorm(
-            s=max(float(target.get("sigma", target.get("s", 1.0))), 1.0e-12),
-            scale=math.exp(float(target.get("mu", 0.0))),
-        ).cdf(values)
-    if family == "gamma":
-        return stats.gamma(
-            a=max(float(target.get("k", target.get("shape", 1.0))), 1.0e-12),
-            scale=max(float(target.get("theta", target.get("scale", 1.0))), 1.0e-12),
-        ).cdf(values)
-    if family == "beta":
-        lower = float(target.get("lower", target.get("minimum", 0.0)))
-        upper = float(target.get("upper", target.get("maximum", 1.0)))
-        return stats.beta(
-            a=max(float(target.get("alpha", 1.0)), 1.0e-12),
-            b=max(float(target.get("beta", 1.0)), 1.0e-12),
-            loc=lower,
-            scale=max(upper - lower, 1.0e-12),
-        ).cdf(values)
     if family == "mixture":
         components = _v3_mixture_components(target)
         if not components:
@@ -3115,7 +3407,7 @@ def _v3_distribution_cdf(values: np.ndarray, target: dict[str, Any]) -> np.ndarr
         for weight, component in components:
             output += weight * _v3_distribution_cdf(values, component)
         return np.clip(output, 0.0, 1.0)
-    return (values >= float(target.get("value", 0.0))).astype(float)
+    return np.asarray(_v3_scipy_distribution(target).cdf(values), dtype=float)
 
 
 def _v3_target_quantile_samples(target: dict[str, Any], count: int) -> np.ndarray:
@@ -3124,52 +3416,84 @@ def _v3_target_quantile_samples(target: dict[str, Any], count: int) -> np.ndarra
     family = str(target.get("family", "constant")).lower()
     if family == "constant":
         return np.full(count, float(target.get("value", 0.0)))
-    if family == "uniform":
-        lower = float(target.get("lower", target.get("minimum", 0.0)))
-        upper = float(target.get("upper", target.get("maximum", lower + 1.0)))
-        return stats.uniform(loc=lower, scale=max(upper - lower, 1.0e-12)).ppf(probabilities)
-    if family == "normal":
-        return stats.norm(
-            loc=float(target.get("mean", target.get("mu", 0.0))),
-            scale=max(float(target.get("sigma", target.get("s", 1.0))), 1.0e-12),
-        ).ppf(probabilities)
-    if family == "lognormal":
-        return stats.lognorm(
-            s=max(float(target.get("sigma", target.get("s", 1.0))), 1.0e-12),
-            scale=math.exp(float(target.get("mu", 0.0))),
-        ).ppf(probabilities)
-    if family == "gamma":
-        return stats.gamma(
-            a=max(float(target.get("k", target.get("shape", 1.0))), 1.0e-12),
-            scale=max(float(target.get("theta", target.get("scale", 1.0))), 1.0e-12),
-        ).ppf(probabilities)
-    if family == "beta":
-        lower = float(target.get("lower", target.get("minimum", 0.0)))
-        upper = float(target.get("upper", target.get("maximum", 1.0)))
-        return stats.beta(
-            a=max(float(target.get("alpha", 1.0)), 1.0e-12),
-            b=max(float(target.get("beta", 1.0)), 1.0e-12),
-            loc=lower,
-            scale=max(upper - lower, 1.0e-12),
-        ).ppf(probabilities)
     if family == "mixture":
         components = _v3_mixture_components(target)
         if not components:
             return np.zeros(count, dtype=float)
         weights = np.asarray([weight for weight, _component in components], dtype=float)
-        raw_counts = weights * count
-        counts = np.floor(raw_counts).astype(int)
-        remainder = count - int(np.sum(counts))
-        if remainder > 0:
-            order = np.argsort(raw_counts - counts)[::-1]
-            counts[order[:remainder]] += 1
+        counts = _v3_allocate_largest_remainder(weights, count)
         values = [
             _v3_target_quantile_samples(component, int(component_count))
             for component_count, (_weight, component) in zip(counts, components, strict=True)
             if component_count > 0
         ]
         return np.sort(np.concatenate(values)) if values else np.zeros(count, dtype=float)
-    return np.full(count, float(target.get("value", 0.0)))
+    return np.asarray(_v3_scipy_distribution(target).ppf(probabilities), dtype=float)
+
+
+def _v3_scipy_distribution(target: dict[str, Any]) -> Any:
+    family = str(target["family"]).lower()
+    if family == "lognormal":
+        sigma = _v3_required_float(target, "sigma", "s")
+        loc = float(target.get("loc", 0.0))
+        scale = float(
+            target.get(
+                "scale",
+                math.exp(float(target.get("mean", target.get("mu", 0.0)))),
+            )
+        )
+        return stats.lognorm(s=sigma, loc=loc, scale=scale)
+    if family == "gamma":
+        shape = _v3_required_float(target, "alpha", "shape", "k")
+        scale = float(target.get("scale", target.get("theta", 1.0)))
+        loc = float(target.get("loc", 0.0))
+        return stats.gamma(a=shape, loc=loc, scale=scale)
+    if family in {"weibull", "weibull_min"}:
+        shape = _v3_required_float(target, "shape", "k", "alpha")
+        scale = float(target.get("scale", 1.0))
+        loc = float(target.get("loc", 0.0))
+        return stats.weibull_min(c=shape, loc=loc, scale=scale)
+    if family in {"truncated_normal", "truncnorm"}:
+        mean = float(target.get("mean", target.get("loc", 0.0)))
+        sigma = _v3_required_float(target, "sigma", "s")
+        lower = float(target["lower"])
+        upper = float(target["upper"])
+        return stats.truncnorm(
+            a=(lower - mean) / sigma,
+            b=(upper - mean) / sigma,
+            loc=mean,
+            scale=sigma,
+        )
+    if family == "beta":
+        alpha = _v3_required_float(target, "alpha")
+        beta = _v3_required_float(target, "beta")
+        lower = float(target.get("lower", target.get("minimum", 0.0)))
+        if "upper" in target:
+            scale = float(target["upper"]) - lower
+        elif "maximum" in target:
+            scale = float(target["maximum"]) - lower
+        else:
+            scale = float(target.get("scale", 1.0))
+        return stats.beta(a=alpha, b=beta, loc=lower, scale=scale)
+    raise ValueError(f"unsupported distribution family: {family}")
+
+
+def _v3_required_float(target: dict[str, Any], *names: str) -> float:
+    for name in names:
+        if name in target:
+            return float(target[name])
+    raise ValueError("distribution requires one of: " + ", ".join(names))
+
+
+def _v3_allocate_largest_remainder(weights: np.ndarray, total: int) -> np.ndarray:
+    values = np.asarray(weights, dtype=float)
+    exact = values / float(np.sum(values)) * int(total)
+    counts = np.floor(exact).astype(int)
+    remainder = int(total) - int(np.sum(counts))
+    if remainder:
+        order = np.lexsort((np.arange(values.size), -(exact - counts)))
+        counts[order[:remainder]] += 1
+    return counts
 
 
 def _v3_mixture_components(target: dict[str, Any]) -> list[tuple[float, dict[str, Any]]]:
@@ -3184,9 +3508,7 @@ def _v3_mixture_components(target: dict[str, Any]) -> list[tuple[float, dict[str
         if not np.isfinite(weight) or weight <= 0.0:
             continue
         distribution = {
-            key: value
-            for key, value in component.items()
-            if key != "weight" and value is not None
+            key: value for key, value in component.items() if key != "weight" and value is not None
         }
         parsed.append((float(weight), distribution))
     total = sum(weight for weight, _component in parsed)
@@ -3198,12 +3520,12 @@ def _v3_mixture_components(target: dict[str, Any]) -> list[tuple[float, dict[str
 def _v3_distribution_scale(target_values: np.ndarray, target: dict[str, Any]) -> float:
     finite = _v3_finite_1d(target_values)
     if finite.size:
-        spread = float(np.percentile(finite, 95) - np.percentile(finite, 5))
+        spread = float(np.max(finite) - np.min(finite))
         if spread > 1.0e-12:
             return spread
     if target.get("family") == "constant":
         return max(abs(float(target.get("value", 0.0))), 1.0)
-    return 1.0
+    return max(abs(float(np.mean(finite))) if finite.size else 0.0, 1.0)
 
 
 def _v3_paired_orientation_marginal(
@@ -3222,14 +3544,176 @@ def _v3_paired_orientation_marginal(
         output.append(
             {
                 "weight": float(component.get("weight", 0.0)),
-                **{
-                    key: value
-                    for key, value in component[field_name].items()
-                    if value is not None
-                },
+                **{key: value for key, value in component[field_name].items() if value is not None},
             }
         )
     return {"family": "mixture", "components": output} if output else None
+
+
+def _v3_compare_paired_orientation_pairs(
+    samples: np.ndarray,
+    target: Any,
+) -> dict[str, Any] | None:
+    if target is None:
+        return None
+    values = np.asarray(samples, dtype=float).reshape((-1, 2))
+    target_dict = _v3_distribution_dict(target)
+    components = target_dict.get("components") or ()
+    if values.size == 0 or not components:
+        return {
+            "passed": False,
+            "sample_count": int(values.shape[0]),
+            "unassigned_pair_count": int(values.shape[0]),
+            "component_count_errors": {},
+        }
+
+    scores = np.full((values.shape[0], len(components)), -np.inf, dtype=float)
+    weights = np.asarray([float(component["weight"]) for component in components])
+    for component_index, component in enumerate(components):
+        score = np.full(
+            values.shape[0],
+            np.log(max(weights[component_index], 1.0e-300)),
+        )
+        supported = np.ones(values.shape[0], dtype=bool)
+        for value_index, field_name in enumerate(("theta_xz_deg", "theta_xy_deg")):
+            distribution = _v3_distribution_dict(component[field_name])
+            lower = float(distribution.get("lower", distribution.get("minimum", 0.0)))
+            upper = float(distribution.get("upper", distribution.get("maximum", 90.0)))
+            in_support = (values[:, value_index] >= lower) & (values[:, value_index] <= upper)
+            supported &= in_support
+            normalized = np.clip(
+                (values[:, value_index] - lower) / max(upper - lower, 1.0e-12),
+                1.0e-12,
+                1.0 - 1.0e-12,
+            )
+            score += stats.beta.logpdf(
+                normalized,
+                a=_v3_required_float(distribution, "alpha"),
+                b=_v3_required_float(distribution, "beta"),
+            ) - np.log(max(upper - lower, 1.0e-12))
+        scores[supported, component_index] = score[supported]
+
+    assigned = np.argmax(scores, axis=1)
+    unassigned = ~np.any(np.isfinite(scores), axis=1)
+    actual_counts = np.bincount(assigned[~unassigned], minlength=len(components))
+    expected_counts = _v3_allocate_largest_remainder(weights, values.shape[0])
+    tolerance = _V3_MIXTURE_WEIGHT_ABSOLUTE_TOLERANCE + 0.5 / max(
+        values.shape[0],
+        1,
+    )
+    count_errors = {
+        f"component_{index}": float((actual - expected) / max(values.shape[0], 1))
+        for index, (actual, expected) in enumerate(zip(actual_counts, expected_counts, strict=True))
+    }
+    return {
+        "passed": bool(
+            not np.any(unassigned)
+            and all(abs(error) <= tolerance for error in count_errors.values())
+        ),
+        "sample_count": int(values.shape[0]),
+        "unassigned_pair_count": int(np.count_nonzero(unassigned)),
+        "component_count_errors": count_errors,
+    }
+
+
+def _v3_constraint_compliance(
+    config: dict[str, Any],
+    phase: dict[str, Any],
+    units: dict[str, Any],
+    final_geometry: dict[str, Any],
+    errors: list[str],
+) -> dict[str, Any]:
+    matrix = config.get("matrix_constraints", {})
+    matrix = matrix if isinstance(matrix, dict) else {}
+    pore = config.get("pore_constraints", {})
+    pore = pore if isinstance(pore, dict) else {}
+
+    matrix_enabled = bool(matrix.get("enabled", True))
+    require_x_percolation = bool(matrix.get("require_x_percolation", True))
+    x_percolates = bool(phase.get("matrix_x_percolates", False))
+    minimum_cross_section = _optional_float(
+        phase.get("minimum_semiconductor_cross_section_fraction")
+    )
+    required_cross_section = _optional_float(matrix.get("minimum_cross_section_fraction", 0.0))
+    overlap_fraction = _optional_float(units.get("overlap_fraction"))
+    maximum_overlap = _optional_float(matrix.get("maximum_overlap_fraction", 0.0))
+
+    x_ok = bool(not matrix_enabled or not require_x_percolation or x_percolates)
+    cross_section_ok = bool(
+        not matrix_enabled
+        or (
+            np.isfinite(minimum_cross_section)
+            and np.isfinite(required_cross_section)
+            and minimum_cross_section >= required_cross_section
+        )
+    )
+    overlap_ok = bool(
+        not matrix_enabled
+        or (
+            np.isfinite(overlap_fraction)
+            and np.isfinite(maximum_overlap)
+            and overlap_fraction <= maximum_overlap
+        )
+    )
+    if not x_ok:
+        errors.append("semiconductor matrix does not percolate along periodic x")
+    if not cross_section_ok:
+        errors.append("minimum semiconductor cross-section fraction is below configured limit")
+    if not overlap_ok:
+        errors.append(
+            "pore overlap fraction is above configured limit or not independently evaluable"
+        )
+
+    connected_components = int(final_geometry.get("connected_pore_component_count", 0))
+    through_components = int(final_geometry.get("through_network_count", 0))
+    through_centerlines = int(final_geometry.get("rebuilt_through_centerline_count", 0))
+    valid_through_cross_sections = len(
+        final_geometry.get("rebuilt_formal_samples", {}).get("equivalent_diameter_A", [])
+    )
+    z_mode = str(pore.get("z_connectivity", "unrestricted"))
+    all_components_through = bool(
+        connected_components > 0 and through_components == connected_components
+    )
+    z_ok = z_mode == "unrestricted" or (z_mode == "all_components" and all_components_through)
+    minimum_through = int(pore.get("minimum_through_centerlines", 0))
+    minimum_valid_sections = int(pore.get("minimum_valid_cross_sections", 0))
+    through_ok = through_centerlines >= minimum_through
+    valid_sections_ok = valid_through_cross_sections >= minimum_valid_sections
+    if not z_ok:
+        errors.append("not all pore components connect both finite z surfaces")
+    if not through_ok:
+        errors.append("minimum through centerlines requirement is not met")
+    if not valid_sections_ok:
+        errors.append("minimum valid cross-sections requirement is not met")
+
+    return {
+        "matrix_constraints_enabled": matrix_enabled,
+        "matrix_x_percolates": x_percolates,
+        "matrix_x_percolation_within_constraint": (
+            x_ok if matrix_enabled and require_x_percolation else None
+        ),
+        "minimum_semiconductor_cross_section_fraction": minimum_cross_section,
+        "minimum_semiconductor_cross_section_within_constraint": (
+            cross_section_ok if matrix_enabled else None
+        ),
+        "pore_overlap_fraction": overlap_fraction,
+        "pore_overlap_within_constraint": overlap_ok if matrix_enabled else None,
+        "pore_z_connectivity_mode": z_mode,
+        "connected_pore_component_count": connected_components,
+        "through_pore_component_count": through_components,
+        "all_pore_components_through_z": all_components_through,
+        "pore_z_connectivity_within_constraint": z_ok if z_mode == "all_components" else None,
+        "through_centerline_count": through_centerlines,
+        "minimum_through_centerlines": minimum_through,
+        "minimum_through_centerlines_within_constraint": (
+            through_ok if minimum_through > 0 else None
+        ),
+        "valid_through_cross_section_count": valid_through_cross_sections,
+        "minimum_valid_cross_sections": minimum_valid_sections,
+        "minimum_valid_cross_sections_within_constraint": (
+            valid_sections_ok if minimum_valid_sections > 0 else None
+        ),
+    }
 
 
 def _v3_center_distance_target_compliance(
@@ -3239,9 +3723,7 @@ def _v3_center_distance_target_compliance(
     measured = final_geometry.get("rebuilt_center_distance_xy", {})
     measured = measured if isinstance(measured, dict) else {}
     target_spec = (
-        config.get("formal_targets", {})
-        .get("position_quantity", {})
-        .get("center_distance_xy")
+        config.get("formal_targets", {}).get("position_quantity", {}).get("center_distance_xy")
     )
     bin_centers = np.asarray(measured.get("bin_centers_A", []), dtype=float)
     observed = np.asarray(measured.get("g_xy", []), dtype=float)
@@ -3279,7 +3761,9 @@ def _v3_evaluate_absolute_distance_target(
         center = _optional_float(component.get("center_A"))
         width = _optional_float(component.get("width_A"))
         amplitude = _optional_float(component.get("amplitude"))
-        if not (np.isfinite(center) and np.isfinite(width) and width > 0.0 and np.isfinite(amplitude)):
+        if not (
+            np.isfinite(center) and np.isfinite(width) and width > 0.0 and np.isfinite(amplitude)
+        ):
             continue
         gaussian = np.exp(-0.5 * ((distance_A - center) / width) ** 2)
         kind = str(component.get("kind", "peak"))
@@ -3348,7 +3832,9 @@ def _compare_main_metrics(
         }
     )
     if not main_metrics_match:
-        errors.append("main_metrics.json porosity does not match independent final_phase.h5 porosity")
+        errors.append(
+            "main_metrics.json porosity does not match independent final_phase.h5 porosity"
+        )
     return consistency
 
 
@@ -3462,27 +3948,24 @@ def _find(label: int, parent: np.ndarray) -> int:
 
 
 def _percolates_x(mask: np.ndarray) -> bool:
-    if mask.ndim != 3 or not np.any(mask[:, :, 0]) or not np.any(mask[:, :, -1]):
+    domain = np.asarray(mask, dtype=bool)
+    if domain.ndim != 3:
+        raise ValueError("mask must have shape (z, y, x)")
+    if not np.any(domain):
         return False
-    visited = np.zeros(mask.shape, dtype=bool)
-    queue: deque[tuple[int, int, int]] = deque()
-    starts = np.argwhere(mask[:, :, 0])
-    for z_index, y_index in starts:
-        visited[z_index, y_index, 0] = True
-        queue.append((int(z_index), int(y_index), 0))
-    while queue:
-        z_index, y_index, x_index = queue.popleft()
-        if x_index == mask.shape[2] - 1:
+
+    ny = domain.shape[1]
+    nx = domain.shape[2]
+    tiled = np.tile(domain, (1, 3, 3))
+    labels, label_count = ndimage.label(tiled, structure=_six_connected_structure())
+    if label_count == 0:
+        return False
+    central_labels = np.unique(labels[:, ny : 2 * ny, nx : 2 * nx][domain])
+    central_labels = central_labels[central_labels != 0]
+    for label in central_labels:
+        _z, _y, x = np.nonzero(labels == label)
+        if x.size and int(x.min()) < nx and int(x.max()) >= 2 * nx:
             return True
-        for dz, dy, dx in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
-            nz = z_index + dz
-            ny = (y_index + dy) % mask.shape[1]
-            nx = x_index + dx
-            if nz < 0 or nz >= mask.shape[0] or nx < 0 or nx >= mask.shape[2]:
-                continue
-            if mask[nz, ny, nx] and not visited[nz, ny, nx]:
-                visited[nz, ny, nx] = True
-                queue.append((nz, ny, nx))
     return False
 
 
@@ -3491,6 +3974,346 @@ def _minimum_cross_section_fraction(semiconductor: np.ndarray) -> float:
         return 0.0
     fractions = np.mean(semiconductor, axis=(0, 1))
     return float(np.min(fractions))
+
+
+def _configured_minimum_skeleton_thickness_A(config: dict[str, Any]) -> float | None:
+    matrix = config.get("matrix_constraints", {})
+    if not isinstance(matrix, dict):
+        return None
+    value = _optional_float(matrix.get("minimum_skeleton_thickness_A"))
+    return float(value) if np.isfinite(value) and value > 0.0 else None
+
+
+def _matrix_mask_for_percolation(
+    semiconductor: np.ndarray,
+    spacing_A: float,
+    minimum_skeleton_thickness_A: float | None,
+) -> np.ndarray:
+    mask = np.asarray(semiconductor, dtype=bool)
+    if minimum_skeleton_thickness_A is None:
+        return mask.copy()
+    if not np.any(mask):
+        return mask.copy()
+    distances = ndimage.distance_transform_edt(mask, sampling=float(spacing_A))
+    return distances >= 0.5 * float(minimum_skeleton_thickness_A)
+
+
+def _independent_overlap_fraction(
+    records: list[dict[str, Any]],
+    channel_curves: dict[str, _ChannelCurveData],
+    phase: _PhaseData,
+    errors: list[str],
+) -> float:
+    pore_indices = np.flatnonzero(phase.mask.ravel())
+    if pore_indices.size == 0 or len(records) < 2:
+        return 0.0
+    overlap_count = 0
+    for start in range(0, pore_indices.size, _OVERLAP_CHUNK_SIZE):
+        stop = min(start + _OVERLAP_CHUNK_SIZE, pore_indices.size)
+        points = _voxel_centers_for_indices(phase, pore_indices[start:stop])
+        coverage = np.zeros(points.shape[0], dtype=np.uint16)
+        for record in records:
+            try:
+                occupied = (
+                    _independent_periodic_unit_field(
+                        record,
+                        channel_curves,
+                        points,
+                        phase.target_box_A,
+                    )
+                    < 0.0
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                errors.append(
+                    "pore overlap fraction could not be independently reconstructed for "
+                    f"unit {record.get('unit_id', '')}: {exc}"
+                )
+                return math.nan
+            coverage += occupied.astype(np.uint16)
+        overlap_count += int(np.count_nonzero(coverage > 1))
+    return float(overlap_count / pore_indices.size)
+
+
+def _independent_periodic_unit_field(
+    record: dict[str, Any],
+    channel_curves: dict[str, _ChannelCurveData],
+    points_A: np.ndarray,
+    target_box_A: np.ndarray,
+) -> np.ndarray:
+    kind = str(record.get("kind", "")).lower()
+    geometry = record.get("realized_geometry", {})
+    latent = record.get("latent_parameters", {})
+    if not isinstance(geometry, dict) or not isinstance(latent, dict):
+        raise TypeError("invalid realized_geometry or latent_parameters")
+    unit_id = str(record.get("unit_id", ""))
+    if kind == "compact":
+        center = np.asarray(geometry["center_A"], dtype=float)
+        radii = np.asarray(
+            geometry.get("envelope_radii_A", geometry.get("radii_A", [])),
+            dtype=float,
+        )
+        support = float(np.max(radii)) * (1.0 + float(latent.get("roughness", 0.0)))
+        extent_min = center - support
+        extent_max = center + support
+    elif kind == "channel":
+        curve = channel_curves.get(unit_id)
+        if curve is None:
+            raise ValueError("channel_curves entry is missing")
+        cross_radius = _independent_channel_cross_radius_A(geometry, latent, curve)
+        support = cross_radius * (1.0 + float(latent.get("roughness", 0.0)))
+        extent_min = np.min(curve.centerline_A, axis=0) - support
+        extent_max = np.max(curve.centerline_A, axis=0) + support
+    else:
+        raise ValueError(f"unsupported unit kind {kind!r}")
+
+    x_shifts = _independent_periodic_shifts(
+        points_A[:, 0],
+        float(extent_min[0]),
+        float(extent_max[0]),
+        float(target_box_A[0]),
+    )
+    y_shifts = _independent_periodic_shifts(
+        points_A[:, 1],
+        float(extent_min[1]),
+        float(extent_max[1]),
+        float(target_box_A[1]),
+    )
+    result = np.full(points_A.shape[0], np.inf, dtype=float)
+    for x_shift in x_shifts:
+        for y_shift in y_shifts:
+            shifted = points_A - np.array([x_shift, y_shift, 0.0], dtype=float)
+            if kind == "compact":
+                field = _independent_compact_field(record, shifted)
+            else:
+                field = _independent_channel_field(
+                    record,
+                    channel_curves[unit_id],
+                    shifted,
+                )
+            result = _independent_smooth_min_pair(result, field)
+    return result
+
+
+def _independent_periodic_shifts(
+    query_values: np.ndarray,
+    unit_minimum_A: float,
+    unit_maximum_A: float,
+    box_length_A: float,
+) -> np.ndarray:
+    first = int(np.floor((float(np.min(query_values)) - unit_maximum_A) / box_length_A))
+    last = int(np.ceil((float(np.max(query_values)) - unit_minimum_A) / box_length_A))
+    return np.arange(first, last + 1, dtype=float) * box_length_A
+
+
+def _independent_compact_field(
+    record: dict[str, Any],
+    points_A: np.ndarray,
+) -> np.ndarray:
+    geometry = record["realized_geometry"]
+    latent = record["latent_parameters"]
+    center = np.asarray(geometry["center_A"], dtype=float)
+    radii = np.asarray(geometry.get("radii_A", []), dtype=float)
+    quaternion = np.asarray(geometry.get("orientation_quaternion_xyzw", []), dtype=float)
+    if center.shape != (3,) or radii.shape != (3,) or quaternion.shape != (4,):
+        raise ValueError("invalid compact center, radii, or orientation")
+    local = Rotation.from_quat(quaternion).inv().apply(points_A - center)
+    if record.get("shape_model") == "multilobe-v1":
+        lobe_centers = np.asarray(geometry.get("lobe_centers_local_A", []), dtype=float)
+        lobe_radii = np.asarray(geometry.get("lobe_radii_A", []), dtype=float)
+        smooth = float(geometry.get("smooth_length_A", 0.0))
+        if lobe_centers.ndim != 2 or lobe_radii.shape != lobe_centers.shape:
+            raise ValueError("invalid multilobe arrays")
+        fields = []
+        for lobe_center, axes in zip(lobe_centers, lobe_radii, strict=True):
+            implicit = np.sqrt(np.sum(((local - lobe_center) / axes) ** 2, axis=1))
+            fields.append((implicit - 1.0) * float(np.min(axes)))
+        base = -smooth * logsumexp(-np.vstack(fields) / smooth, axis=0)
+    else:
+        exponent = float(latent.get("superellipsoid_exponent", 2.0))
+        if exponent == 2.0 and np.allclose(radii, radii[0]):
+            base = np.linalg.norm(local, axis=1) - float(radii[0])
+        else:
+            radial_xy = np.sqrt((local[:, 0] / radii[0]) ** 2 + (local[:, 1] / radii[1]) ** 2)
+            axial_z = np.abs(local[:, 2] / radii[2])
+            implicit = (radial_xy**exponent + axial_z**exponent) ** (1.0 / exponent)
+            base = (implicit - 1.0) * float(np.min(radii))
+    roughness = float(latent.get("roughness", 0.0))
+    return base - _independent_roughness_perturbation(
+        local / np.maximum(radii, 1.0e-12),
+        unit_id=str(record.get("unit_id", "")),
+        roughness=roughness,
+        length_scale_A=float(np.min(radii)),
+    )
+
+
+def _independent_channel_cross_radius_A(
+    geometry: dict[str, Any],
+    latent: dict[str, Any],
+    curve: _ChannelCurveData,
+) -> float:
+    value = _optional_float(
+        geometry.get(
+            "equivalent_radius_A",
+            latent.get("cross_radius_A", curve.equivalent_radius_A),
+        )
+    )
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError("missing positive channel equivalent radius")
+    return float(value)
+
+
+def _independent_channel_field(
+    record: dict[str, Any],
+    curve: _ChannelCurveData,
+    points_A: np.ndarray,
+) -> np.ndarray:
+    geometry = record["realized_geometry"]
+    latent = record["latent_parameters"]
+    centerline = np.asarray(curve.centerline_A, dtype=float)
+    starts = centerline[:-1]
+    ends = centerline[1:]
+    segment_vectors = ends - starts
+    segment_lengths = np.linalg.norm(segment_vectors, axis=1)
+    if np.any(segment_lengths <= 0.0):
+        raise ValueError("channel centerline contains zero-length segments")
+    tangents = segment_vectors / segment_lengths[:, np.newaxis]
+    start_normals = tangents.copy()
+    end_normals = tangents.copy()
+    for index in range(1, tangents.shape[0]):
+        start_normals[index] = _independent_safe_bisector(tangents[index - 1], tangents[index])
+    for index in range(tangents.shape[0] - 1):
+        end_normals[index] = _independent_safe_bisector(tangents[index], tangents[index + 1])
+    cumulative = np.concatenate(([0.0], np.cumsum(segment_lengths)))
+    arc_length = float(cumulative[-1])
+    cross_radius = _independent_channel_cross_radius_A(geometry, latent, curve)
+    roughness = float(latent.get("roughness", 0.0))
+    profile_s = np.asarray(geometry.get("radius_profile_s", []), dtype=float)
+    profile_A = np.asarray(geometry.get("radius_profile_A", []), dtype=float)
+    interpolator = (
+        PchipInterpolator(profile_s, profile_A)
+        if profile_s.size >= 2 and profile_A.shape == profile_s.shape
+        else None
+    )
+
+    frames = [
+        Rotation.align_vectors(
+            tangent[np.newaxis, :],
+            np.array([[1.0, 0.0, 0.0]]),
+        )[0]
+        for tangent in tangents
+    ]
+    result = np.full(points_A.shape[0], np.inf, dtype=float)
+    for index, (start, end, tangent, segment_length, frame) in enumerate(
+        zip(starts, ends, tangents, segment_lengths, frames, strict=True)
+    ):
+        offset = points_A - start
+        local = frame.inv().apply(offset)
+        axial = np.clip(offset @ tangent, 0.0, float(segment_length))
+        normalized_s = (float(cumulative[index]) + axial) / arc_length
+        local_radius = (
+            np.asarray(interpolator(normalized_s), dtype=float)
+            if interpolator is not None
+            else np.full(points_A.shape[0], cross_radius, dtype=float)
+        )
+        closest = start + axial[:, np.newaxis] * tangent
+        radial = np.linalg.norm(points_A - closest, axis=1) - local_radius
+        start_signed = -(offset @ start_normals[index])
+        end_signed = (points_A - end) @ end_normals[index]
+        inside = (start_signed <= 0.0) & (end_signed <= 0.0)
+        field = radial.copy()
+        field[~inside] = np.maximum(
+            radial[~inside],
+            np.maximum(start_signed[~inside], end_signed[~inside]),
+        )
+        coordinates = np.column_stack(
+            [normalized_s, local[:, 1] / cross_radius, local[:, 2] / cross_radius]
+        )
+        field -= _independent_roughness_perturbation(
+            coordinates,
+            unit_id=str(record.get("unit_id", "")),
+            roughness=roughness,
+            length_scale_A=cross_radius,
+        )
+        result = _independent_smooth_min_pair(result, field)
+
+    first_local = frames[0].inv().apply(points_A - starts[0])
+    first_radius = float(interpolator(0.0)) if interpolator is not None else cross_radius
+    first = np.linalg.norm(first_local, axis=1) - first_radius
+    first = np.where(first_local[:, 0] <= 0.0, first, np.inf)
+    first -= _independent_roughness_perturbation(
+        np.column_stack(
+            [
+                np.zeros(points_A.shape[0]),
+                first_local[:, 1] / cross_radius,
+                first_local[:, 2] / cross_radius,
+            ]
+        ),
+        unit_id=str(record.get("unit_id", "")),
+        roughness=roughness,
+        length_scale_A=cross_radius,
+    )
+    result = _independent_smooth_min_pair(result, first)
+
+    last_local = frames[-1].inv().apply(points_A - ends[-1])
+    last_radius = float(interpolator(1.0)) if interpolator is not None else cross_radius
+    last = np.linalg.norm(last_local, axis=1) - last_radius
+    last = np.where(last_local[:, 0] >= 0.0, last, np.inf)
+    last -= _independent_roughness_perturbation(
+        np.column_stack(
+            [
+                np.ones(points_A.shape[0]),
+                last_local[:, 1] / cross_radius,
+                last_local[:, 2] / cross_radius,
+            ]
+        ),
+        unit_id=str(record.get("unit_id", "")),
+        roughness=roughness,
+        length_scale_A=cross_radius,
+    )
+    return _independent_smooth_min_pair(result, last)
+
+
+def _independent_safe_bisector(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    combined = np.asarray(first, dtype=float) + np.asarray(second, dtype=float)
+    norm = float(np.linalg.norm(combined))
+    return np.asarray(second, dtype=float) if norm <= 1.0e-12 else combined / norm
+
+
+def _independent_roughness_perturbation(
+    local_coordinates: np.ndarray,
+    *,
+    unit_id: str,
+    roughness: float,
+    length_scale_A: float,
+) -> np.ndarray:
+    if roughness == 0.0:
+        return np.zeros(local_coordinates.shape[0], dtype=float)
+    seed_bytes = blake2b(unit_id.encode("utf-8"), digest_size=8).digest()
+    seed = int.from_bytes(seed_bytes, byteorder="little", signed=False)
+    rng = np.random.default_rng(seed)
+    amplitudes = rng.uniform(0.35, 1.0, _ROUGHNESS_MODE_COUNT)
+    phases = rng.uniform(0.0, 2.0 * np.pi, _ROUGHNESS_MODE_COUNT)
+    coordinate = np.sum(local_coordinates, axis=1)
+    perturbation = np.zeros(local_coordinates.shape[0], dtype=float)
+    for frequency, phase, amplitude in zip(
+        np.arange(1, _ROUGHNESS_MODE_COUNT + 1, dtype=float),
+        phases,
+        amplitudes,
+        strict=True,
+    ):
+        perturbation += amplitude * np.sin(2.0 * np.pi * frequency * coordinate + phase)
+    perturbation /= float(_ROUGHNESS_MODE_COUNT)
+    return float(roughness) * float(length_scale_A) * perturbation
+
+
+def _independent_smooth_min_pair(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    return (
+        -np.logaddexp(
+            -_SMOOTH_UNION_SHARPNESS * first,
+            -_SMOOTH_UNION_SHARPNESS * second,
+        )
+        / _SMOOTH_UNION_SHARPNESS
+    )
 
 
 def _anchor_from_record(record: dict[str, Any]) -> np.ndarray | None:
@@ -3533,36 +4356,25 @@ def _unit_volume_A3(
         latent = record.get("latent_parameters", {})
         curve = channel_curves.get(unit_id)
         if curve is None:
-            errors.append(
-                f"channel_curves.h5 is missing centerline samples for channel {unit_id}"
-            )
+            errors.append(f"channel_curves.h5 is missing centerline samples for channel {unit_id}")
             return None
         if schema_version >= 2 or curve.schema_version >= 2:
             return _v2_channel_volume_A3(record, geometry, curve, errors)
         radius = _optional_float(
             geometry.get(
                 "cross_radius_A",
-                latent.get("cross_radius_A")
-                if isinstance(latent, dict)
-                else math.nan,
+                latent.get("cross_radius_A") if isinstance(latent, dict) else math.nan,
             )
         )
         if not np.isfinite(radius) or radius <= 0.0:
             errors.append(f"channel {unit_id} is missing a positive cross_radius_A")
             return None
-        length = float(
-            np.sum(np.linalg.norm(np.diff(curve.centerline_A, axis=0), axis=1))
-        )
-        volume = (
-            math.pi * radius * radius * length
-            + 4.0 * math.pi * radius**3 / 3.0
-        )
+        length = float(np.sum(np.linalg.norm(np.diff(curve.centerline_A, axis=0), axis=1)))
+        volume = math.pi * radius * radius * length + 4.0 * math.pi * radius**3 / 3.0
         _check_target_volume(record, unit_id, volume, errors)
         return volume
     if kind:
-        warnings.append(
-            f"unit volume was not independently evaluable for {record.get('unit_id')}"
-        )
+        warnings.append(f"unit volume was not independently evaluable for {record.get('unit_id')}")
     return None
 
 
@@ -3651,9 +4463,10 @@ def _v2_multilobe_volume_A3(
     connected = _multilobe_connected(centers, radii)
     if not connected:
         errors.append(f"compact {unit_id} lobe graph is disconnected")
-    if geometry.get("lobes_connected") is not None and bool(
-        geometry.get("lobes_connected")
-    ) != connected:
+    if (
+        geometry.get("lobes_connected") is not None
+        and bool(geometry.get("lobes_connected")) != connected
+    ):
         errors.append(f"compact {unit_id} lobes_connected flag is inconsistent")
 
     latent = record.get("latent_parameters", {})
@@ -3696,18 +4509,11 @@ def _independent_multilobe_envelope_radii_A(
                         strict=True,
                     ):
                         normalized = math.sqrt(
-                            float(
-                                np.sum(
-                                    ((point - lobe_center) / lobe_radii) ** 2
-                                )
-                            )
+                            float(np.sum(((point - lobe_center) / lobe_radii) ** 2))
                         )
-                        values.append(
-                            (normalized - 1.0) * float(np.min(lobe_radii))
-                        )
+                        values.append((normalized - 1.0) * float(np.min(lobe_radii)))
                     return float(
-                        -smooth_length_A
-                        * logsumexp(-np.asarray(values) / smooth_length_A)
+                        -smooth_length_A * logsumexp(-np.asarray(values) / smooth_length_A)
                     )
 
                 upper = max(
@@ -3774,12 +4580,8 @@ def _multilobe_connected(centers_A: np.ndarray, radii_A: np.ndarray) -> bool:
                 overlaps = True
             else:
                 direction = delta / distance
-                support_first = 1.0 / math.sqrt(
-                    float(np.sum((direction / radii_A[first]) ** 2))
-                )
-                support_second = 1.0 / math.sqrt(
-                    float(np.sum((direction / radii_A[second]) ** 2))
-                )
+                support_first = 1.0 / math.sqrt(float(np.sum((direction / radii_A[first]) ** 2)))
+                support_second = 1.0 / math.sqrt(float(np.sum((direction / radii_A[second]) ** 2)))
                 overlaps = distance <= support_first + support_second + 1.0e-10
             if overlaps:
                 adjacency[first].add(second)
@@ -3808,10 +4610,7 @@ def _v2_channel_volume_A3(
         errors.append(f"channel {unit_id} is missing integer shape_seed")
     if curve.shape_model is not None and curve.shape_model != shape_model:
         errors.append(f"channel {unit_id} HDF5 shape_model is inconsistent")
-    if (
-        curve.shape_seed is not None
-        and curve.shape_seed != record.get("shape_seed")
-    ):
+    if curve.shape_seed is not None and curve.shape_seed != record.get("shape_seed"):
         errors.append(f"channel {unit_id} HDF5 shape_seed is inconsistent")
     if curve.radius_A is None:
         errors.append(f"channel {unit_id} v2 curve is missing radius_A")
@@ -3837,14 +4636,11 @@ def _v2_channel_volume_A3(
     if not np.isfinite(equivalent_radius) or equivalent_radius <= 0.0:
         errors.append(f"channel {unit_id} is missing positive equivalent_radius_A")
         return None
-    if (
-        curve.equivalent_radius_A is not None
-        and not np.isclose(
-            curve.equivalent_radius_A,
-            equivalent_radius,
-            rtol=1.0e-8,
-            atol=1.0e-8,
-        )
+    if curve.equivalent_radius_A is not None and not np.isclose(
+        curve.equivalent_radius_A,
+        equivalent_radius,
+        rtol=1.0e-8,
+        atol=1.0e-8,
     ):
         errors.append(f"channel {unit_id} HDF5 equivalent_radius_A is inconsistent")
     if end_distance <= 0.0:
@@ -3908,9 +4704,7 @@ def _v2_channel_volume_A3(
         dtype=float,
     )
     if not np.allclose(radius_samples, expected_radii, rtol=1.0e-5, atol=1.0e-7):
-        errors.append(
-            f"channel {unit_id} HDF5 radius_A is inconsistent with its profile"
-        )
+        errors.append(f"channel {unit_id} HDF5 radius_A is inconsistent with its profile")
 
     dense_s = np.linspace(0.0, 1.0, 4097)
     dense_radii = np.asarray(interpolator(dense_s), dtype=float)
@@ -3924,20 +4718,14 @@ def _v2_channel_volume_A3(
     if minimum_ratio >= 0.85 or maximum_ratio <= 1.15:
         errors.append(f"channel {unit_id} lacks a required neck or bulge")
     claimed_cv = _optional_float(geometry.get("radius_cv"))
-    if np.isfinite(claimed_cv) and not np.isclose(
-        claimed_cv, radius_cv, rtol=0.05, atol=0.01
-    ):
+    if np.isfinite(claimed_cv) and not np.isclose(claimed_cv, radius_cv, rtol=0.05, atol=0.01):
         errors.append(f"channel {unit_id} radius_cv is inconsistent")
-    claimed_minmax = _optional_float(
-        geometry.get("minimum_to_maximum_radius_ratio")
-    )
+    claimed_minmax = _optional_float(geometry.get("minimum_to_maximum_radius_ratio"))
     realized_minmax = float(np.min(dense_radii) / np.max(dense_radii))
     if np.isfinite(claimed_minmax) and not np.isclose(
         claimed_minmax, realized_minmax, rtol=0.03, atol=0.01
     ):
-        errors.append(
-            f"channel {unit_id} minimum_to_maximum_radius_ratio is inconsistent"
-        )
+        errors.append(f"channel {unit_id} minimum_to_maximum_radius_ratio is inconsistent")
 
     controls = np.asarray(geometry.get("control_points_unwrapped_A", []), dtype=float)
     if (
@@ -3962,9 +4750,7 @@ def _v2_channel_volume_A3(
         ):
             errors.append(f"channel {unit_id} nonplanarity is inconsistent")
         if tau > 1.05 and (bend_count < 2 or nonplanarity <= 1.0e-3):
-            errors.append(
-                f"channel {unit_id} must be multibend and nonplanar when tau > 1.05"
-            )
+            errors.append(f"channel {unit_id} must be multibend and nonplanar when tau > 1.05")
 
     clearance = _independent_channel_self_clearance_A(
         centerline,
@@ -3976,15 +4762,8 @@ def _v2_channel_volume_A3(
     if np.isfinite(claimed_clearance) and claimed_clearance < -1.0e-8:
         errors.append(f"channel {unit_id} minimum_self_clearance_A is invalid")
 
-    body = math.pi * arc_length * float(
-        np.trapezoid(dense_radii**2, dense_s)
-    )
-    caps = (
-        2.0
-        * math.pi
-        * (float(profile_A[0]) ** 3 + float(profile_A[-1]) ** 3)
-        / 3.0
-    )
+    body = math.pi * arc_length * float(np.trapezoid(dense_radii**2, dense_s))
+    caps = 2.0 * math.pi * (float(profile_A[0]) ** 3 + float(profile_A[-1]) ** 3) / 3.0
     volume = body + caps
     _check_target_volume(record, unit_id, volume, errors)
     return volume
@@ -3999,9 +4778,7 @@ def _check_close_metric(
     *,
     rtol: float = 0.01,
 ) -> None:
-    if not np.isfinite(claimed) or not np.isclose(
-        claimed, realized, rtol=rtol, atol=1.0e-8
-    ):
+    if not np.isfinite(claimed) or not np.isclose(claimed, realized, rtol=rtol, atol=1.0e-8):
         errors.append(f"channel {unit_id} {name} is inconsistent with exported geometry")
 
 
@@ -4011,9 +4788,7 @@ def _independent_bend_count(control_points_A: np.ndarray) -> int:
     if np.any(lengths <= 0.0):
         return 0
     directions = vectors / lengths[:, np.newaxis]
-    angles = np.arccos(
-        np.clip(np.sum(directions[:-1] * directions[1:], axis=1), -1.0, 1.0)
-    )
+    angles = np.arccos(np.clip(np.sum(directions[:-1] * directions[1:], axis=1), -1.0, 1.0))
     return int(np.count_nonzero(angles > 0.08))
 
 
@@ -4026,15 +4801,11 @@ def _independent_control_spline(
     parameters /= float(parameters[-1])
     target = np.linspace(0.0, 1.0, sample_count)
     if control_points_A.shape[0] == 2:
-        return (
-            (1.0 - target[:, np.newaxis]) * control_points_A[0]
-            + target[:, np.newaxis] * control_points_A[1]
-        )
+        return (1.0 - target[:, np.newaxis]) * control_points_A[0] + target[
+            :, np.newaxis
+        ] * control_points_A[1]
     return np.column_stack(
-        [
-            CubicSpline(parameters, control_points_A[:, axis])(target)
-            for axis in range(3)
-        ]
+        [CubicSpline(parameters, control_points_A[:, axis])(target) for axis in range(3)]
     )
 
 
@@ -4049,9 +4820,7 @@ def _independent_channel_self_clearance_A(
     radius_A: np.ndarray,
 ) -> float:
     if centerline_A.shape[0] > 129:
-        indices = np.unique(
-            np.linspace(0, centerline_A.shape[0] - 1, 129).round().astype(int)
-        )
+        indices = np.unique(np.linspace(0, centerline_A.shape[0] - 1, 129).round().astype(int))
         centerline_A = centerline_A[indices]
         radius_A = radius_A[indices]
     segment_lengths = np.linalg.norm(np.diff(centerline_A, axis=0), axis=1)
@@ -4140,7 +4909,11 @@ def _cif_atom_count(path: Path, errors: list[str]) -> int:
         errors.append("mandatory placed_structure.cif is missing")
         return 0
     try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("HETATM "))
+        return sum(
+            1
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("HETATM ")
+        )
     except OSError as exc:
         errors.append(f"mandatory placed_structure.cif could not be read: {exc}")
         return 0
@@ -4354,9 +5127,13 @@ def _markdown_report(report: ValidationReport) -> str:
         "",
         "## Errors",
     ]
-    lines.extend(f"- {error}" for error in report.errors) if report.errors else lines.append("- None")
+    lines.extend(f"- {error}" for error in report.errors) if report.errors else lines.append(
+        "- None"
+    )
     lines.extend(["", "## Warnings"])
-    lines.extend(f"- {warning}" for warning in report.warnings) if report.warnings else lines.append("- None")
+    lines.extend(
+        f"- {warning}" for warning in report.warnings
+    ) if report.warnings else lines.append("- None")
     lines.extend(["", "## Independent metrics", ""])
     lines.append("```json")
     lines.append(json.dumps(report.independent_metrics, indent=2, sort_keys=True))

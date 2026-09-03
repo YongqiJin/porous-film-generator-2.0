@@ -58,6 +58,18 @@ def test_periodic_xy_thickness_uses_slabs_when_full_tile_exceeds_limit() -> None
     np.testing.assert_allclose(slabbed, unbounded)
 
 
+def test_periodic_xy_full_and_slab_paths_match_for_tapered_channel() -> None:
+    z, y, x = np.indices((12, 20, 20))
+    radius = 2.0 + 3.0 * z / 11.0
+    mask = (x - 10) ** 2 + (y - 10) ** 2 <= radius**2
+
+    full = local_thickness_field(mask, spacing_A=1.0, periodic_xy=True, max_voxels=100_000)
+    slabbed = local_thickness_field(mask, spacing_A=1.0, periodic_xy=True, max_voxels=48_000)
+
+    np.testing.assert_array_equal(full, slabbed)
+    assert np.all(full[mask] > 0.0)
+
+
 def test_periodic_xy_bounded_slabs_preserve_large_z_radius_feature() -> None:
     mask = np.zeros((15, 9, 9), dtype=bool)
     mask[4:11, :, :] = True
@@ -108,7 +120,7 @@ def test_coarse_fine_thickness_comparison_passes_within_two_fine_voxels() -> Non
 def test_coarse_fine_thickness_comparison_fails_when_quantiles_disagree() -> None:
     coarse = np.zeros((3, 3, 3), dtype=bool)
     coarse[1, 1, 1] = True
-    fine = np.ones((6, 6, 6), dtype=bool)
+    fine = np.ones((8, 8, 8), dtype=bool)
 
     result = compare_local_thickness_coarse_fine(
         coarse,

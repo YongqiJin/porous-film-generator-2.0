@@ -35,3 +35,15 @@ def test_visual_report_contains_all_four_pages(sample_config_path: Path, tmp_pat
     assert "reportData" in report
     assert "pore_points" in report
     assert "centerlines" in report
+    assert '"name":"z 孔拓扑","passed":null' in report
+    assert '"name":"最少贯通中心线","passed":null' in report
+    assert '"name":"最少有效贯通截面","passed":null' in report
+    assert "输入参数（归一化）" in report
+    assert "输入配置审核" in report
+    assert "最终观测" in report
+    assert "输入 → 观测逐项审核" in report
+    assert "运行警告与失败原因" in report
+    assert "生成过程" in report
+    assert "阶段耗时" in report
+    assert 'id="validationCharts"' not in report
+    assert "drawDistribution" not in report

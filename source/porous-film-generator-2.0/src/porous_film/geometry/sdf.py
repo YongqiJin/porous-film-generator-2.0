@@ -131,8 +131,7 @@ class CompactUnit(PoreUnit):
         if self.is_multilobe:
             lobe_radii = np.asarray(self.lobe_radii_A, dtype=float)
             base_bound = max(
-                _compact_base_lipschitz_bound(values, float(self.exponent))
-                for values in lobe_radii
+                _compact_base_lipschitz_bound(values, float(self.exponent)) for values in lobe_radii
             )
         else:
             base_bound = _compact_base_lipschitz_bound(radii, float(self.exponent))
@@ -153,13 +152,10 @@ class CompactUnit(PoreUnit):
             base = np.linalg.norm(local, axis=1) - float(self.radii_A[0])
         else:
             radial_xy = np.sqrt(
-                (local[:, 0] / self.radii_A[0]) ** 2
-                + (local[:, 1] / self.radii_A[1]) ** 2
+                (local[:, 0] / self.radii_A[0]) ** 2 + (local[:, 1] / self.radii_A[1]) ** 2
             )
             axial_z = np.abs(local[:, 2] / self.radii_A[2])
-            implicit = (radial_xy**self.exponent + axial_z**self.exponent) ** (
-                1.0 / self.exponent
-            )
+            implicit = (radial_xy**self.exponent + axial_z**self.exponent) ** (1.0 / self.exponent)
             base = (implicit - 1.0) * float(np.min(self.radii_A))
         return base - _roughness_perturbation(
             local_coordinates=local / np.maximum(self.radii_A, 1e-12),
@@ -378,12 +374,8 @@ class ChannelUnit(PoreUnit):
             length_scale_A=radius,
         )
         segment_support = max_radii + roughness_support
-        segment_aabb_min = (
-            np.minimum(segment_starts, segment_ends) - segment_support[:, np.newaxis]
-        )
-        segment_aabb_max = (
-            np.maximum(segment_starts, segment_ends) + segment_support[:, np.newaxis]
-        )
+        segment_aabb_min = np.minimum(segment_starts, segment_ends) - segment_support[:, np.newaxis]
+        segment_aabb_max = np.maximum(segment_starts, segment_ends) + segment_support[:, np.newaxis]
         overall_orientation = orientation or _segment_frame(samples[-1] - samples[0])
 
         return ChannelUnit(
@@ -409,8 +401,7 @@ class ChannelUnit(PoreUnit):
             segment_aabb_max_A=segment_aabb_max,
             arc_length_A=arc_length,
             end_distance_A=end_distance,
-            eta=arc_length
-            / _channel_equivalent_diameter_A(profile_s, profile_radii, radius),
+            eta=arc_length / _channel_equivalent_diameter_A(profile_s, profile_radii, radius),
             tortuosity=arc_length / end_distance,
             anchor_A=anchor,
             latent_eta=latent_eta,
@@ -461,9 +452,7 @@ class ChannelUnit(PoreUnit):
             unit_id=self.unit_id,
             roughness=float(self.roughness),
             length_scale_A=radius,
-            coordinate_derivative_norm=float(
-                np.sqrt((1.0 / arc_length) ** 2 + 2.0 / radius**2)
-            ),
+            coordinate_derivative_norm=float(np.sqrt((1.0 / arc_length) ** 2 + 2.0 / radius**2)),
         )
         return 1.0 + radius_slope + roughness_bound
 
@@ -483,8 +472,7 @@ class ChannelUnit(PoreUnit):
         field_count = self.segment_lengths_A.size + 2
         if not use_aabb_culling:
             fields = [
-                self._segment_field(index, points)
-                for index in range(self.segment_lengths_A.size)
+                self._segment_field(index, points) for index in range(self.segment_lengths_A.size)
             ]
             fields.extend(self._endpoint_cap_fields(points))
             return _smooth_min(np.vstack(fields), axis=0)
@@ -537,10 +525,9 @@ class ChannelUnit(PoreUnit):
         closest = start + axial[:, np.newaxis] * self.segment_tangents_A[index]
         radial = np.linalg.norm(points_A - closest, axis=1) - local_radius
         start_signed = -(offset @ self.segment_start_plane_normals_A[index])
-        end_signed = (
-            (points_A - self.segment_ends_A[index])
-            @ self.segment_end_plane_normals_A[index]
-        )
+        end_signed = (points_A - self.segment_ends_A[index]) @ self.segment_end_plane_normals_A[
+            index
+        ]
         inside = (start_signed <= 0.0) & (end_signed <= 0.0)
         base = radial.copy()
         base[~inside] = np.maximum(
@@ -617,9 +604,7 @@ class ChannelUnit(PoreUnit):
                 if self.latent_target_volume_A3 is None
                 else float(self.latent_target_volume_A3),
                 "eta": float(self.latent_eta if self.latent_eta is not None else self.eta),
-                "tau": float(
-                    self.latent_tau if self.latent_tau is not None else self.tortuosity
-                ),
+                "tau": float(self.latent_tau if self.latent_tau is not None else self.tortuosity),
                 "orientation": _latent_orientation_record(
                     self.latent_theta_rad,
                     self.latent_phi_rad,
@@ -649,9 +634,7 @@ class ChannelUnit(PoreUnit):
                 "tortuosity": float(self.tortuosity),
                 "orientation": _realized_orientation_record(
                     self.orientation
-                    or _segment_frame(
-                        self.centerline_samples_A[-1] - self.centerline_samples_A[0]
-                    )
+                    or _segment_frame(self.centerline_samples_A[-1] - self.centerline_samples_A[0])
                 ),
                 "segment_frame_quaternions_xyzw": [
                     frame.as_quat().tolist() for frame in self.local_segment_frames
@@ -713,16 +696,10 @@ class PoreGeometry:
             if isinstance(unit, CompactUnit) and _compact_minimum_image_safe(
                 unit, self.target_box_A
             ):
-                shifted_values.append(
-                    _compact_periodic_sdf(unit, points, self.target_box_A)
-                )
+                shifted_values.append(_compact_periodic_sdf(unit, points, self.target_box_A))
                 continue
-            x_shifts = _periodic_shifts_for_axis(
-                points[:, 0], unit, axis=0, box=self.target_box_A
-            )
-            y_shifts = _periodic_shifts_for_axis(
-                points[:, 1], unit, axis=1, box=self.target_box_A
-            )
+            x_shifts = _periodic_shifts_for_axis(points[:, 0], unit, axis=0, box=self.target_box_A)
+            y_shifts = _periodic_shifts_for_axis(points[:, 1], unit, axis=1, box=self.target_box_A)
             for x_shift in x_shifts:
                 for y_shift in y_shifts:
                     shifted = points - np.array([x_shift, y_shift, 0.0], dtype=float)
@@ -769,15 +746,16 @@ def build_units(
     )
     formal_shape = config.formal_targets.shape
     if config.source_schema_version == 3:
-        channel_diameters = stratified_sample(
-            formal_shape.equivalent_diameter_A,
-            int(np.count_nonzero(labels == "channel")),
-            rng,
+        channel_count = int(np.count_nonzero(labels == "channel"))
+        channel_diameters = (
+            stratified_sample(formal_shape.equivalent_diameter_A, channel_count, rng)
+            if formal_shape.equivalent_diameter_A is not None
+            else np.full(channel_count, np.nan, dtype=float)
         )
-        curvature_targets = stratified_sample(
-            formal_shape.curvature_fluctuation,
-            count,
-            rng,
+        curvature_targets = (
+            stratified_sample(formal_shape.curvature_fluctuation, count, rng)
+            if formal_shape.curvature_fluctuation is not None
+            else np.full(count, np.nan, dtype=float)
         )
     else:
         channel_diameters = np.full(
@@ -864,21 +842,43 @@ def build_units(
                 target_equivalent_diameter_A=None
                 if not np.isfinite(equivalent_diameter)
                 else equivalent_diameter,
+                measured_centerline_sample_count=(
+                    max(
+                        2,
+                        round(
+                            float(target_box[2])
+                            / float(config.measurement.z_slice_spacing_A)
+                        ),
+                    )
+                    if config.source_schema_version == 3
+                    and config.pore_constraints.z_connectivity == "all_components"
+                    and formal_shape.channel_tortuosity is not None
+                    and formal_shape.channel_aspect_ratio is None
+                    else None
+                ),
             )
             unit_id = f"channel-{channel_index:04d}"
+            roughness = float(
+                _initial_roughness_from_curvature_target(curvature_target)
+                if np.isfinite(curvature_target)
+                else channel_roughness[channel_index]
+            )
             control_points = (
                 orientation_sample.rotation.apply(shape_profile.control_points_local_A)
                 + latent_anchor
             )
+            if config.pore_constraints.z_connectivity == "all_components":
+                control_points = _position_control_points_through_z(
+                    control_points,
+                    target_box_z_A=float(target_box[2]),
+                    radius_A=float(np.max(shape_profile.radius_profile_A)),
+                    allow_lengthening=formal_shape.channel_aspect_ratio is None,
+                )
             unit = ChannelUnit.from_polyline(
                 unit_id=unit_id,
                 control_points_unwrapped_A=control_points,
                 cross_radius_A=shape_profile.equivalent_radius_A,
-                roughness=float(
-                    _initial_roughness_from_curvature_target(curvature_target)
-                    if np.isfinite(curvature_target)
-                    else channel_roughness[channel_index]
-                ),
+                roughness=roughness,
                 latent_eta=eta,
                 latent_tau=tau,
                 latent_theta_rad=orientation_sample.theta_rad,
@@ -917,6 +917,34 @@ def build_units(
         realized_anchors_A=realized_anchors_array,
         latent_to_realized_ids=latent_to_realized_ids,
     )
+
+
+def _position_control_points_through_z(
+    control_points_A: np.ndarray,
+    *,
+    target_box_z_A: float,
+    radius_A: float,
+    allow_lengthening: bool = False,
+) -> np.ndarray:
+    """Place a channel across finite z, lengthening it only when eta is unconstrained."""
+    controls = _as_points(control_points_A, "control_points_A").copy()
+    samples = _sample_adaptive_spline(controls, radius_A)
+    minimum_z = float(np.min(samples[:, 2]))
+    maximum_z = float(np.max(samples[:, 2]))
+    if maximum_z - minimum_z < float(target_box_z_A):
+        if not allow_lengthening:
+            raise ValueError(
+                "sampled channel cannot span z while preserving configured diameter, "
+                "orientation, eta, and tau"
+            )
+        midpoint = 0.5 * (controls[0] + controls[-1])
+        factor = float(target_box_z_A) / max(maximum_z - minimum_z, np.finfo(float).tiny)
+        controls = midpoint + (controls - midpoint) * factor * (1.0 + 32.0 * np.finfo(float).eps)
+        samples = _sample_adaptive_spline(controls, radius_A)
+        minimum_z = float(np.min(samples[:, 2]))
+        maximum_z = float(np.max(samples[:, 2]))
+    controls[:, 2] += 0.5 * float(target_box_z_A) - 0.5 * (minimum_z + maximum_z)
+    return controls
 
 
 def _as_points(points_A: np.ndarray, name: str) -> np.ndarray:
@@ -993,11 +1021,7 @@ def _evaluate_cached_pchip(
     indices = np.clip(indices, 0, nodes.size - 2)
     delta = samples - nodes[indices]
     return (
-        (
-            coefficients[0, indices] * delta
-            + coefficients[1, indices]
-        )
-        * delta
+        (coefficients[0, indices] * delta + coefficients[1, indices]) * delta
         + coefficients[2, indices]
     ) * delta + coefficients[3, indices]
 
@@ -1025,10 +1049,9 @@ def _insert_profile_arclength_samples(
         left = right - 1
         span = normalized[right] - normalized[left]
         fraction = (target - normalized[left]) / max(float(span), 1.0e-15)
-        result[index] = (
-            (1.0 - fraction) * centerline_samples_A[left]
-            + fraction * centerline_samples_A[right]
-        )
+        result[index] = (1.0 - fraction) * centerline_samples_A[
+            left
+        ] + fraction * centerline_samples_A[right]
     return result
 
 
@@ -1039,9 +1062,7 @@ def _channel_segment_max_radii(
     segment_ends_s: np.ndarray,
 ) -> np.ndarray:
     maxima = np.empty(segment_starts_s.shape, dtype=float)
-    for index, (start, end) in enumerate(
-        zip(segment_starts_s, segment_ends_s, strict=True)
-    ):
+    for index, (start, end) in enumerate(zip(segment_starts_s, segment_ends_s, strict=True)):
         interior = profile_s[(profile_s > start) & (profile_s < end)]
         sample_s = np.concatenate(([start], interior, [end]))
         maxima[index] = float(np.max(interpolator(sample_s)))
@@ -1080,9 +1101,9 @@ def _roughness_amplitude_support_A(
     if roughness == 0.0:
         return 0.0
     parameters = _roughness_parameters(unit_id, roughness)
-    mean_absolute_amplitude = sum(
-        abs(float(value)) for value in parameters["amplitudes"]
-    ) / max(float(parameters["mode_count"]), 1.0)
+    mean_absolute_amplitude = sum(abs(float(value)) for value in parameters["amplitudes"]) / max(
+        float(parameters["mode_count"]), 1.0
+    )
     return float(roughness) * float(length_scale_A) * mean_absolute_amplitude
 
 
@@ -1115,10 +1136,13 @@ def _smooth_min_skip_margin_A(segment_count: int, tolerance_A: float = 1.0e-10) 
 
 
 def _smooth_min_pair(first: np.ndarray, second: np.ndarray) -> np.ndarray:
-    return -np.logaddexp(
-        -_SMOOTH_UNION_SHARPNESS * first,
-        -_SMOOTH_UNION_SHARPNESS * second,
-    ) / _SMOOTH_UNION_SHARPNESS
+    return (
+        -np.logaddexp(
+            -_SMOOTH_UNION_SHARPNESS * first,
+            -_SMOOTH_UNION_SHARPNESS * second,
+        )
+        / _SMOOTH_UNION_SHARPNESS
+    )
 
 
 def _sample_adaptive_spline(control_points: np.ndarray, radius_A: float) -> np.ndarray:
@@ -1134,9 +1158,8 @@ def _sample_adaptive_spline(control_points: np.ndarray, radius_A: float) -> np.n
         chord_middle = 0.5 * (left_point + right_point)
         chord_error = float(np.linalg.norm(middle_point - chord_middle))
         turn = _angle_between(tangent(left), tangent(right))
-        if (
-            depth < _SPLINE_MAX_REFINEMENT_DEPTH
-            and (chord_error > tolerance or turn > _SPLINE_MAX_TURN_RAD)
+        if depth < _SPLINE_MAX_REFINEMENT_DEPTH and (
+            chord_error > tolerance or turn > _SPLINE_MAX_TURN_RAD
         ):
             refine(left, middle, depth + 1)
             refine(middle, right, depth + 1)
@@ -1557,6 +1580,24 @@ def _sample_orientations(
         permutation = rng.permutation(len(samples))
         return tuple(samples[int(index)] for index in permutation)
 
+    if (
+        config.source_schema_version == 3
+        and config.pore_constraints.z_connectivity == "all_components"
+    ):
+        direction = np.array([0.0, 0.0, 1.0])
+        rotation = _segment_frame(direction)
+        return tuple(
+            OrientationSample(
+                rotation=rotation,
+                theta_rad=float(np.pi / 2.0),
+                phi_rad=float(np.pi / 2.0),
+                theta_xz_deg=None,
+                theta_xy_deg=None,
+                paired_component_index=None,
+            )
+            for _ in range(count)
+        )
+
     polar_fraction = stratified_sample(config.orientation.distribution, count, rng)
     theta = np.pi * np.clip(polar_fraction, 0.0, 1.0)
     azimuth = rng.uniform(0.0, 2.0 * np.pi, count)
@@ -1573,9 +1614,7 @@ def _sample_orientations(
             theta_rad=float(sampled_theta),
             phi_rad=float(sampled_phi),
         )
-        for direction, sampled_theta, sampled_phi in zip(
-            directions, theta, azimuth, strict=True
-        )
+        for direction, sampled_theta, sampled_phi in zip(directions, theta, azimuth, strict=True)
     )
 
 
