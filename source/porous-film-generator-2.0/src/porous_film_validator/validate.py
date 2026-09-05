@@ -155,6 +155,7 @@ def validate_export(qa_export: Path) -> ValidationReport:
         phase_data,
         errors,
         warnings,
+        enforce_complex_shape_contract=schema_version < 3,
     )
     molecule_metrics = (
         _read_molecule_metrics(qa / "molecules", errors, warnings)
@@ -425,6 +426,8 @@ def _read_unit_metrics(
     phase: _PhaseData | None,
     errors: list[str],
     warnings: list[str],
+    *,
+    enforce_complex_shape_contract: bool,
 ) -> dict[str, Any]:
     records = _read_jsonl(path, errors)
     channel_curves = _read_channel_curves(channel_curve_path, errors)
@@ -440,7 +443,14 @@ def _read_unit_metrics(
         dtype=float,
     ).reshape((-1, 3))
     volume_samples = [
-        _unit_volume_A3(record, channel_curves, errors, warnings) for record in records
+        _unit_volume_A3(
+            record,
+            channel_curves,
+            errors,
+            warnings,
+            enforce_complex_shape_contract=enforce_complex_shape_contract,
+        )
+        for record in records
     ]
     finite_volumes = np.asarray(
         [volume for volume in volume_samples if volume is not None and np.isfinite(volume)],
@@ -1784,9 +1794,8 @@ def _v3_projected_orientation(
             theta_xy_identifiable=False,
         )
     axis = axis / norm
-    if (
-        channel_aspect_ratio is not None
-        and channel_aspect_ratio <= 1.0 + float(aspect_ratio_tolerance)
+    if channel_aspect_ratio is not None and channel_aspect_ratio <= 1.0 + float(
+        aspect_ratio_tolerance
     ):
         return _V3ProjectedOrientationMeasurement(
             track_id=track.track_id,
@@ -1877,6 +1886,11 @@ def _v3_measure_normal_cross_sections(
     sampled_centerlines: dict[int, tuple[np.ndarray, np.ndarray]],
 ) -> tuple[_V3CrossSectionMeasurement, ...]:
     output: list[_V3CrossSectionMeasurement] = []
+    interpolation_mask = np.pad(
+        phase.mask.astype(float),
+        ((0, 0), (1, 1), (1, 1)),
+        mode="wrap",
+    )
     for track in tracks:
         points, wall_distances = sampled_centerlines[track.track_id]
         if points.shape[0] < 2:
@@ -1911,6 +1925,15 @@ def _v3_measure_normal_cross_sections(
                 cumulative,
                 float(arc_position),
             )
+            tangent = _v3_local_track_tangent(
+                points,
+                cumulative,
+                float(arc_position),
+                half_window_A=max(
+                    2.0 * float(contract.centerline_sample_spacing_A),
+                    0.5 * float(wall_distance),
+                ),
+            )
             if (
                 branch_arc_positions.size
                 and contract.branch_exclusion_length_A > 0.0
@@ -1936,6 +1959,7 @@ def _v3_measure_normal_cross_sections(
                     tangent=tangent,
                     wall_distance_A=wall_distance,
                     contract=contract,
+                    interpolation_mask=interpolation_mask,
                 )
             )
     return tuple(output)
@@ -2010,6 +2034,42 @@ def _v3_interpolate_track(
     return center, tangent, float(wall)
 
 
+def _v3_local_track_tangent(
+    points_A: np.ndarray,
+    cumulative_A: np.ndarray,
+    arc_position_A: float,
+    *,
+    half_window_A: float,
+) -> np.ndarray:
+    points = np.asarray(points_A, dtype=float)
+    cumulative = np.asarray(cumulative_A, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or cumulative.shape != (points.shape[0],):
+        raise ValueError("centerline points and cumulative arc lengths must match")
+    if points.shape[0] < 2:
+        raise ValueError("at least two centerline points are required")
+    window = max(float(half_window_A), 1.0e-12)
+    lower = max(float(cumulative[0]), float(arc_position_A) - window)
+    upper = min(float(cumulative[-1]), float(arc_position_A) + window)
+    if upper <= lower:
+        lower = float(cumulative[0])
+        upper = float(cumulative[-1])
+    first = np.asarray(
+        [np.interp(lower, cumulative, points[:, axis]) for axis in range(3)],
+        dtype=float,
+    )
+    second = np.asarray(
+        [np.interp(upper, cumulative, points[:, axis]) for axis in range(3)],
+        dtype=float,
+    )
+    tangent = second - first
+    norm = float(np.linalg.norm(tangent))
+    if norm <= 1.0e-12:
+        index = int(np.clip(np.searchsorted(cumulative, arc_position_A), 1, points.shape[0] - 1))
+        tangent = points[index] - points[index - 1]
+        norm = float(np.linalg.norm(tangent))
+    return tangent / max(norm, 1.0e-12)
+
+
 def _v3_measure_one_cross_section(
     phase: _PhaseData,
     *,
@@ -2019,6 +2079,7 @@ def _v3_measure_one_cross_section(
     tangent: np.ndarray,
     wall_distance_A: float,
     contract: _V3MeasurementContract,
+    interpolation_mask: np.ndarray,
 ) -> _V3CrossSectionMeasurement:
     first_axis, second_axis = _v3_normal_plane_axes(tangent)
     plane_spacing = min(
@@ -2041,6 +2102,7 @@ def _v3_measure_one_cross_section(
             second_axis=second_axis,
             half_extent_A=extent,
             plane_spacing_A=plane_spacing,
+            interpolation_mask=interpolation_mask,
         )
         if component is None:
             return _v3_invalid_cross_section(
@@ -2094,6 +2156,7 @@ def _v3_sample_normal_component(
     second_axis: np.ndarray,
     half_extent_A: float,
     plane_spacing_A: float,
+    interpolation_mask: np.ndarray,
 ) -> tuple[np.ndarray | None, np.ndarray]:
     coordinate = np.arange(
         -half_extent_A,
@@ -2112,10 +2175,10 @@ def _v3_sample_normal_component(
     x_index = (world[:, :, 0] - phase.origin_A[0]) / phase.spacing_A - 0.5
     y_index = (world[:, :, 1] - phase.origin_A[1]) / phase.spacing_A - 0.5
     z_index = (world[:, :, 2] - phase.origin_A[2]) / phase.spacing_A - 0.5
-    x_index = np.mod(x_index, nx)
-    y_index = np.mod(y_index, ny)
+    x_index = np.mod(x_index, nx) + 1.0
+    y_index = np.mod(y_index, ny) + 1.0
     sampled = ndimage.map_coordinates(
-        phase.mask.astype(float),
+        interpolation_mask,
         [z_index, y_index, x_index],
         order=1,
         mode="constant",
@@ -2960,6 +3023,106 @@ def _voxel_centers_for_indices(phase: _PhaseData, indices: np.ndarray) -> np.nda
 
 def _points_inside_triangle_mesh(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
     triangles = np.asarray(mesh.triangles, dtype=float)
+    query_points = np.asarray(points, dtype=float)
+    if triangles.shape[0] < 4096 or query_points.shape[0] < 32:
+        return _points_inside_triangle_mesh_brute_force(mesh, query_points)
+
+    direction = np.asarray([1.0, 0.3713906763541037, 0.13736056394868904], dtype=float)
+    direction /= np.linalg.norm(direction)
+    projection_u = np.cross(direction, np.array([0.0, 0.0, 1.0]))
+    projection_u /= np.linalg.norm(projection_u)
+    projection_v = np.cross(direction, projection_u)
+    projection_v /= np.linalg.norm(projection_v)
+    triangle_u = np.einsum("tij,j->ti", triangles, projection_u)
+    triangle_v = np.einsum("tij,j->ti", triangles, projection_v)
+    triangle_min_u = np.min(triangle_u, axis=1)
+    triangle_max_u = np.max(triangle_u, axis=1)
+    triangle_min_v = np.min(triangle_v, axis=1)
+    triangle_max_v = np.max(triangle_v, axis=1)
+    point_u = query_points @ projection_u
+    point_v = query_points @ projection_v
+
+    lower_u = float(min(np.min(triangle_min_u), np.min(point_u)))
+    upper_u = float(max(np.max(triangle_max_u), np.max(point_u)))
+    if not np.isfinite(lower_u) or not np.isfinite(upper_u) or upper_u <= lower_u:
+        return _points_inside_triangle_mesh_brute_force(mesh, query_points)
+    bin_count = 256
+    bin_width = (upper_u - lower_u) / float(bin_count)
+    projection_epsilon = max(1.0, upper_u - lower_u) * 1.0e-12
+    first_bins = np.floor((triangle_min_u - projection_epsilon - lower_u) / bin_width).astype(
+        np.int64
+    )
+    last_bins = np.floor((triangle_max_u + projection_epsilon - lower_u) / bin_width).astype(
+        np.int64
+    )
+    first_bins = np.clip(first_bins, 0, bin_count - 1)
+    last_bins = np.clip(last_bins, 0, bin_count - 1)
+    spans = last_bins - first_bins + 1
+    maximum_span = int(np.max(spans, initial=1))
+    membership_count = int(np.sum(spans, dtype=np.int64))
+    if maximum_span > 32 or membership_count > 8 * triangles.shape[0]:
+        return _points_inside_triangle_mesh_brute_force(mesh, query_points)
+
+    member_bins_parts: list[np.ndarray] = []
+    member_triangles_parts: list[np.ndarray] = []
+    for offset in range(maximum_span):
+        active = spans > offset
+        member_bins_parts.append(first_bins[active] + offset)
+        member_triangles_parts.append(np.flatnonzero(active))
+    member_bins = np.concatenate(member_bins_parts)
+    member_triangles = np.concatenate(member_triangles_parts)
+    order = np.argsort(member_bins, kind="stable")
+    member_bins = member_bins[order]
+    member_triangles = member_triangles[order]
+    bin_starts = np.searchsorted(member_bins, np.arange(bin_count), side="left")
+    bin_stops = np.searchsorted(member_bins, np.arange(bin_count), side="right")
+
+    triangle_zero = triangles[:, 0]
+    edge1 = triangles[:, 1] - triangle_zero
+    edge2 = triangles[:, 2] - triangle_zero
+    h_vec = np.cross(direction, edge2)
+    determinant = np.einsum("ij,ij->i", edge1, h_vec)
+    eps = 1.0e-9
+    valid_determinant = np.abs(determinant) > eps
+    inverse_determinant = np.zeros_like(determinant)
+    inverse_determinant[valid_determinant] = 1.0 / determinant[valid_determinant]
+
+    point_bins = np.floor((point_u - lower_u) / bin_width).astype(np.int64)
+    point_bins = np.clip(point_bins, 0, bin_count - 1)
+    inside = np.zeros(query_points.shape[0], dtype=bool)
+    for point_index, point in enumerate(query_points):
+        point_bin = int(point_bins[point_index])
+        candidates = member_triangles[bin_starts[point_bin] : bin_stops[point_bin]]
+        projected = (
+            (triangle_min_u[candidates] <= point_u[point_index] + projection_epsilon)
+            & (triangle_max_u[candidates] >= point_u[point_index] - projection_epsilon)
+            & (triangle_min_v[candidates] <= point_v[point_index] + projection_epsilon)
+            & (triangle_max_v[candidates] >= point_v[point_index] - projection_epsilon)
+        )
+        candidates = candidates[projected]
+        if candidates.size == 0:
+            continue
+        s_vec = point - triangle_zero[candidates]
+        u_coord = inverse_determinant[candidates] * np.einsum("ij,ij->i", s_vec, h_vec[candidates])
+        q_vec = np.cross(s_vec, edge1[candidates])
+        v_coord = inverse_determinant[candidates] * (q_vec @ direction)
+        distance = inverse_determinant[candidates] * np.einsum("ij,ij->i", edge2[candidates], q_vec)
+        hits = (
+            valid_determinant[candidates]
+            & (u_coord >= -eps)
+            & (v_coord >= -eps)
+            & (u_coord + v_coord <= 1.0 + eps)
+            & (distance > eps)
+        )
+        inside[point_index] = (int(np.count_nonzero(hits)) % 2) == 1
+    return inside
+
+
+def _points_inside_triangle_mesh_brute_force(
+    mesh: trimesh.Trimesh,
+    points: np.ndarray,
+) -> np.ndarray:
+    triangles = np.asarray(mesh.triangles, dtype=float)
     direction = np.asarray([1.0, 0.3713906763541037, 0.13736056394868904], dtype=float)
     direction /= np.linalg.norm(direction)
     inside = np.zeros(points.shape[0], dtype=bool)
@@ -3229,8 +3392,7 @@ def _v3_target_compliance(
     for name, target in distribution_specs.items():
         sample_values = np.asarray(samples.get(sample_keys[name], []), dtype=float)
         evaluated = bool(
-            target is not None
-            and (name not in through_dependent_names or evaluate_through_targets)
+            target is not None and (name not in through_dependent_names or evaluate_through_targets)
         )
         result = (
             _v3_distribution_target_result(
@@ -3301,12 +3463,8 @@ def _v3_target_compliance(
     )
     center_evaluated = bool(isinstance(center_target, dict) and evaluate_through_targets)
     output["g_xy_evaluated"] = center_evaluated
-    output["g_xy_within_tolerance"] = (
-        bool(center_result["passed"]) if center_evaluated else None
-    )
-    output["g_xy_weighted_loss"] = (
-        center_result["weighted_loss"] if center_evaluated else None
-    )
+    output["g_xy_within_tolerance"] = bool(center_result["passed"]) if center_evaluated else None
+    output["g_xy_weighted_loss"] = center_result["weighted_loss"] if center_evaluated else None
     output["g_xy_pair_count"] = center_result["pair_count"]
     if center_evaluated and not center_result["passed"]:
         errors.append(
@@ -3565,6 +3723,22 @@ def _v3_compare_paired_orientation_pairs(
             "sample_count": int(values.shape[0]),
             "unassigned_pair_count": int(values.shape[0]),
             "component_count_errors": {},
+            "joint_gate_required": True,
+        }
+
+    xz_specs = [_v3_distribution_dict(component["theta_xz_deg"]) for component in components]
+    xy_specs = [_v3_distribution_dict(component["theta_xy_deg"]) for component in components]
+    joint_gate_required = not (
+        all(spec == xz_specs[0] for spec in xz_specs[1:])
+        or all(spec == xy_specs[0] for spec in xy_specs[1:])
+    )
+    if not joint_gate_required:
+        return {
+            "passed": True,
+            "sample_count": int(values.shape[0]),
+            "unassigned_pair_count": 0,
+            "component_count_errors": {},
+            "joint_gate_required": False,
         }
 
     scores = np.full((values.shape[0], len(components)), -np.inf, dtype=float)
@@ -3613,6 +3787,7 @@ def _v3_compare_paired_orientation_pairs(
         "sample_count": int(values.shape[0]),
         "unassigned_pair_count": int(np.count_nonzero(unassigned)),
         "component_count_errors": count_errors,
+        "joint_gate_required": True,
     }
 
 
@@ -4014,11 +4189,20 @@ def _independent_overlap_fraction(
         coverage = np.zeros(points.shape[0], dtype=np.uint16)
         for record in records:
             try:
-                occupied = (
+                active = _independent_unit_support_mask(
+                    record,
+                    channel_curves,
+                    points,
+                    phase.target_box_A,
+                )
+                if not np.any(active):
+                    continue
+                occupied = np.zeros(points.shape[0], dtype=bool)
+                occupied[active] = (
                     _independent_periodic_unit_field(
                         record,
                         channel_curves,
-                        points,
+                        points[active],
                         phase.target_box_A,
                     )
                     < 0.0
@@ -4032,6 +4216,84 @@ def _independent_overlap_fraction(
             coverage += occupied.astype(np.uint16)
         overlap_count += int(np.count_nonzero(coverage > 1))
     return float(overlap_count / pore_indices.size)
+
+
+def _independent_unit_support_mask(
+    record: dict[str, Any],
+    channel_curves: dict[str, _ChannelCurveData],
+    points_A: np.ndarray,
+    target_box_A: np.ndarray,
+) -> np.ndarray:
+    kind = str(record.get("kind", "")).lower()
+    geometry = record.get("realized_geometry", {})
+    latent = record.get("latent_parameters", {})
+    if not isinstance(geometry, dict) or not isinstance(latent, dict):
+        raise TypeError("invalid realized_geometry or latent_parameters")
+    roughness = float(latent.get("roughness", 0.0))
+    if kind == "compact":
+        center = np.asarray(geometry["center_A"], dtype=float)
+        radii = np.asarray(
+            geometry.get("envelope_radii_A", geometry.get("radii_A", [])),
+            dtype=float,
+        )
+        support = float(np.max(radii)) * (1.0 + roughness)
+        extent_min = center - support
+        extent_max = center + support
+        primitive_count = max(1, len(geometry.get("lobe_centers_local_A", [])))
+    elif kind == "channel":
+        unit_id = str(record.get("unit_id", ""))
+        curve = channel_curves.get(unit_id)
+        if curve is None:
+            raise ValueError("channel_curves entry is missing")
+        cross_radius = _independent_channel_cross_radius_A(geometry, latent, curve)
+        maximum_radius = (
+            cross_radius
+            if curve.radius_A is None
+            else max(cross_radius, float(np.max(curve.radius_A)))
+        )
+        support = maximum_radius * (1.0 + roughness)
+        extent_min = np.min(curve.centerline_A, axis=0) - support
+        extent_max = np.max(curve.centerline_A, axis=0) + support
+        primitive_count = max(1, int(curve.centerline_A.shape[0] - 1)) + 2
+    else:
+        raise ValueError(f"unsupported unit kind {kind!r}")
+
+    # The reconstructed unit field is a smooth minimum over up to nine periodic
+    # images.  This margin guarantees that omitted positive tails cannot move the
+    # zero level set by more than floating-point noise.
+    margin_A = _independent_zero_level_support_margin(9 * primitive_count)
+    active = np.ones(points_A.shape[0], dtype=bool)
+    for axis in (0, 1):
+        span = float(extent_max[axis] - extent_min[axis])
+        if span >= float(target_box_A[axis]):
+            continue
+        center = 0.5 * float(extent_min[axis] + extent_max[axis])
+        delta = (
+            np.mod(points_A[:, axis] - center + 0.5 * target_box_A[axis], target_box_A[axis])
+            - 0.5 * target_box_A[axis]
+        )
+        active &= np.abs(delta) <= 0.5 * span + margin_A
+    active &= points_A[:, 2] >= float(extent_min[2]) - margin_A
+    active &= points_A[:, 2] <= float(extent_max[2]) + margin_A
+    return active
+
+
+def _independent_zero_level_support_margin(component_count: int) -> float:
+    return float(np.log(max(1, int(component_count))) / _SMOOTH_UNION_SHARPNESS + 1.0e-9)
+
+
+def _independent_aabb_support_mask(
+    points_A: np.ndarray,
+    minimum_A: np.ndarray,
+    maximum_A: np.ndarray,
+    *,
+    margin_A: float,
+) -> np.ndarray:
+    return np.all(
+        (points_A >= np.asarray(minimum_A, dtype=float) - float(margin_A))
+        & (points_A <= np.asarray(maximum_A, dtype=float) + float(margin_A)),
+        axis=1,
+    )
 
 
 def _independent_periodic_unit_field(
@@ -4203,22 +4465,36 @@ def _independent_channel_field(
         for tangent in tangents
     ]
     result = np.full(points_A.shape[0], np.inf, dtype=float)
+    maximum_radius = (
+        cross_radius if curve.radius_A is None else max(cross_radius, float(np.max(curve.radius_A)))
+    )
+    support_radius = maximum_radius + roughness * cross_radius
+    margin_A = _independent_zero_level_support_margin(len(starts) + 2)
     for index, (start, end, tangent, segment_length, frame) in enumerate(
         zip(starts, ends, tangents, segment_lengths, frames, strict=True)
     ):
-        offset = points_A - start
+        active = _independent_aabb_support_mask(
+            points_A,
+            np.minimum(start, end) - support_radius,
+            np.maximum(start, end) + support_radius,
+            margin_A=margin_A,
+        )
+        if not np.any(active):
+            continue
+        active_points = points_A[active]
+        offset = active_points - start
         local = frame.inv().apply(offset)
         axial = np.clip(offset @ tangent, 0.0, float(segment_length))
         normalized_s = (float(cumulative[index]) + axial) / arc_length
         local_radius = (
             np.asarray(interpolator(normalized_s), dtype=float)
             if interpolator is not None
-            else np.full(points_A.shape[0], cross_radius, dtype=float)
+            else np.full(active_points.shape[0], cross_radius, dtype=float)
         )
         closest = start + axial[:, np.newaxis] * tangent
-        radial = np.linalg.norm(points_A - closest, axis=1) - local_radius
+        radial = np.linalg.norm(active_points - closest, axis=1) - local_radius
         start_signed = -(offset @ start_normals[index])
-        end_signed = (points_A - end) @ end_normals[index]
+        end_signed = (active_points - end) @ end_normals[index]
         inside = (start_signed <= 0.0) & (end_signed <= 0.0)
         field = radial.copy()
         field[~inside] = np.maximum(
@@ -4234,16 +4510,22 @@ def _independent_channel_field(
             roughness=roughness,
             length_scale_A=cross_radius,
         )
-        result = _independent_smooth_min_pair(result, field)
+        result[active] = _independent_smooth_min_pair(result[active], field)
 
-    first_local = frames[0].inv().apply(points_A - starts[0])
     first_radius = float(interpolator(0.0)) if interpolator is not None else cross_radius
+    first_active = _independent_aabb_support_mask(
+        points_A,
+        starts[0] - first_radius - roughness * cross_radius,
+        starts[0] + first_radius + roughness * cross_radius,
+        margin_A=margin_A,
+    )
+    first_local = frames[0].inv().apply(points_A[first_active] - starts[0])
     first = np.linalg.norm(first_local, axis=1) - first_radius
     first = np.where(first_local[:, 0] <= 0.0, first, np.inf)
     first -= _independent_roughness_perturbation(
         np.column_stack(
             [
-                np.zeros(points_A.shape[0]),
+                np.zeros(first_local.shape[0]),
                 first_local[:, 1] / cross_radius,
                 first_local[:, 2] / cross_radius,
             ]
@@ -4252,16 +4534,22 @@ def _independent_channel_field(
         roughness=roughness,
         length_scale_A=cross_radius,
     )
-    result = _independent_smooth_min_pair(result, first)
+    result[first_active] = _independent_smooth_min_pair(result[first_active], first)
 
-    last_local = frames[-1].inv().apply(points_A - ends[-1])
     last_radius = float(interpolator(1.0)) if interpolator is not None else cross_radius
+    last_active = _independent_aabb_support_mask(
+        points_A,
+        ends[-1] - last_radius - roughness * cross_radius,
+        ends[-1] + last_radius + roughness * cross_radius,
+        margin_A=margin_A,
+    )
+    last_local = frames[-1].inv().apply(points_A[last_active] - ends[-1])
     last = np.linalg.norm(last_local, axis=1) - last_radius
     last = np.where(last_local[:, 0] >= 0.0, last, np.inf)
     last -= _independent_roughness_perturbation(
         np.column_stack(
             [
-                np.ones(points_A.shape[0]),
+                np.ones(last_local.shape[0]),
                 last_local[:, 1] / cross_radius,
                 last_local[:, 2] / cross_radius,
             ]
@@ -4270,7 +4558,8 @@ def _independent_channel_field(
         roughness=roughness,
         length_scale_A=cross_radius,
     )
-    return _independent_smooth_min_pair(result, last)
+    result[last_active] = _independent_smooth_min_pair(result[last_active], last)
+    return result
 
 
 def _independent_safe_bisector(first: np.ndarray, second: np.ndarray) -> np.ndarray:
@@ -4332,6 +4621,8 @@ def _unit_volume_A3(
     channel_curves: dict[str, _ChannelCurveData],
     errors: list[str],
     warnings: list[str],
+    *,
+    enforce_complex_shape_contract: bool,
 ) -> float | None:
     geometry = record.get("realized_geometry", {})
     if not isinstance(geometry, dict):
@@ -4359,7 +4650,13 @@ def _unit_volume_A3(
             errors.append(f"channel_curves.h5 is missing centerline samples for channel {unit_id}")
             return None
         if schema_version >= 2 or curve.schema_version >= 2:
-            return _v2_channel_volume_A3(record, geometry, curve, errors)
+            return _v2_channel_volume_A3(
+                record,
+                geometry,
+                curve,
+                errors,
+                enforce_complex_shape_contract=enforce_complex_shape_contract,
+            )
         radius = _optional_float(
             geometry.get(
                 "cross_radius_A",
@@ -4601,6 +4898,8 @@ def _v2_channel_volume_A3(
     geometry: dict[str, Any],
     curve: _ChannelCurveData,
     errors: list[str],
+    *,
+    enforce_complex_shape_contract: bool,
 ) -> float | None:
     unit_id = str(record.get("unit_id", ""))
     shape_model = record.get("shape_model")
@@ -4711,12 +5010,13 @@ def _v2_channel_volume_A3(
     radius_cv = float(np.std(dense_radii) / np.mean(dense_radii))
     minimum_ratio = float(np.min(dense_radii) / equivalent_radius)
     maximum_ratio = float(np.max(dense_radii) / equivalent_radius)
-    if not 0.15 <= radius_cv <= 0.30:
-        errors.append(f"channel {unit_id} radius CV is outside 0.15-0.30")
-    if minimum_ratio < 0.60 - 1.0e-6 or maximum_ratio > 1.45 + 1.0e-6:
-        errors.append(f"channel {unit_id} radius profile exceeds 0.60-1.45 bounds")
-    if minimum_ratio >= 0.85 or maximum_ratio <= 1.15:
-        errors.append(f"channel {unit_id} lacks a required neck or bulge")
+    if enforce_complex_shape_contract:
+        if not 0.15 <= radius_cv <= 0.30:
+            errors.append(f"channel {unit_id} radius CV is outside 0.15-0.30")
+        if minimum_ratio < 0.60 - 1.0e-6 or maximum_ratio > 1.45 + 1.0e-6:
+            errors.append(f"channel {unit_id} radius profile exceeds 0.60-1.45 bounds")
+        if minimum_ratio >= 0.85 or maximum_ratio <= 1.15:
+            errors.append(f"channel {unit_id} lacks a required neck or bulge")
     claimed_cv = _optional_float(geometry.get("radius_cv"))
     if np.isfinite(claimed_cv) and not np.isclose(claimed_cv, radius_cv, rtol=0.05, atol=0.01):
         errors.append(f"channel {unit_id} radius_cv is inconsistent")

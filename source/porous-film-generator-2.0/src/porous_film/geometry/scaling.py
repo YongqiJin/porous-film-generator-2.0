@@ -93,27 +93,33 @@ def separate_channel_footprints_xy(
         ],
         dtype=float,
     )
+    first_indices, second_indices = np.triu_indices(len(channels), k=1)
 
     for _ in range(iterations):
         displacements = np.zeros_like(positions)
-        maximum_overlap = 0.0
-        for first in range(len(channels)):
-            for second in range(first + 1, len(channels)):
-                delta = positions[second] - positions[first]
-                delta -= box_xy * np.round(delta / box_xy)
-                distance = float(np.linalg.norm(delta))
-                overlap = float(footprint_radii[first] + footprint_radii[second] - distance)
-                if overlap <= 0.0:
-                    continue
-                maximum_overlap = max(maximum_overlap, overlap)
-                if distance <= 1.0e-12:
-                    angle = (first * 37 + second * 101) * 0.6180339887498949
-                    direction = np.array([np.cos(angle), np.sin(angle)], dtype=float)
-                else:
-                    direction = delta / distance
-                move = 0.2 * overlap * direction
-                displacements[first] -= move
-                displacements[second] += move
+        delta = positions[second_indices] - positions[first_indices]
+        delta -= box_xy * np.round(delta / box_xy)
+        distances = np.linalg.norm(delta, axis=1)
+        overlaps = footprint_radii[first_indices] + footprint_radii[second_indices] - distances
+        active = overlaps > 0.0
+        maximum_overlap = float(np.max(overlaps, initial=0.0))
+        if np.any(active):
+            active_first = first_indices[active]
+            active_second = second_indices[active]
+            active_delta = delta[active]
+            active_distances = distances[active]
+            directions = np.empty_like(active_delta)
+            separated = active_distances > 1.0e-12
+            directions[separated] = (
+                active_delta[separated] / active_distances[separated, np.newaxis]
+            )
+            coincident_first = active_first[~separated]
+            coincident_second = active_second[~separated]
+            angles = (coincident_first * 37 + coincident_second * 101) * 0.6180339887498949
+            directions[~separated] = np.column_stack((np.cos(angles), np.sin(angles)))
+            moves = 0.2 * overlaps[active, np.newaxis] * directions
+            np.add.at(displacements, active_first, -moves)
+            np.add.at(displacements, active_second, moves)
         positions = np.mod(positions + displacements, box_xy)
         if maximum_overlap <= 1.0e-6:
             break
@@ -233,11 +239,11 @@ def scale_unit(
             latent_orientation_component_index=unit.latent_orientation_component_index,
             latent_equivalent_diameter_A=None
             if unit.latent_equivalent_diameter_A is None
-            else unit.latent_equivalent_diameter_A * scale,
+            else unit.latent_equivalent_diameter_A,
             latent_curvature_fluctuation_target=unit.latent_curvature_fluctuation_target,
             latent_target_volume_A3=None
             if unit.latent_target_volume_A3 is None
-            else unit.latent_target_volume_A3 * scale**3,
+            else unit.latent_target_volume_A3,
             latent_eta=unit.latent_eta,
             shape_model=unit.shape_model,
             shape_seed=unit.shape_seed,
@@ -276,12 +282,12 @@ def scale_unit(
             latent_orientation_component_index=unit.latent_orientation_component_index,
             latent_equivalent_diameter_A=None
             if unit.latent_equivalent_diameter_A is None
-            else unit.latent_equivalent_diameter_A * scale,
+            else unit.latent_equivalent_diameter_A,
             latent_curvature_fluctuation_target=unit.latent_curvature_fluctuation_target,
             orientation=unit.orientation,
             latent_target_volume_A3=None
             if unit.latent_target_volume_A3 is None
-            else unit.latent_target_volume_A3 * scale**3,
+            else unit.latent_target_volume_A3,
             shape_model=unit.shape_model,
             shape_seed=unit.shape_seed,
             radius_profile_s=None

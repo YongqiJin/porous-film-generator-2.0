@@ -503,6 +503,24 @@ def test_scale_unit_preserves_complex_shape_similarity() -> None:
             assert np.isclose(scaled.tortuosity, unit.tortuosity)
 
 
+def test_scale_unit_does_not_rewrite_formal_target_provenance() -> None:
+    config = _geometry_v3_config(seed_count=1)
+    built = build_units(
+        config,
+        _single_latent_plan(np.array([50.0, 50.0, 50.0])),
+        np.random.default_rng(303),
+    )
+    channel = built.units[0]
+
+    scaled = scale_built_geometry(built, 1.5).units[0]
+
+    assert isinstance(channel, ChannelUnit)
+    assert isinstance(scaled, ChannelUnit)
+    assert scaled.latent_equivalent_diameter_A == channel.latent_equivalent_diameter_A
+    assert scaled.latent_target_volume_A3 == channel.latent_target_volume_A3
+    assert not np.isclose(scaled.cross_radius_A, channel.cross_radius_A)
+
+
 def test_variable_radius_channel_uses_internal_profile_nodes_along_straight_centerline() -> None:
     channel = ChannelUnit.from_polyline(
         unit_id="variable-straight",
@@ -840,6 +858,7 @@ def test_schema_v3_channel_uses_absolute_equivalent_diameter_target() -> None:
     record = channel.to_record()
 
     assert np.isclose(measured_diameter, 8.0, rtol=1e-3)
+    assert np.ptp(dense_radii) <= 1.0e-12
     assert np.isclose(channel.arc_length_A / measured_diameter, 4.0, rtol=1e-2)
     assert record["latent_parameters"]["equivalent_diameter_A"] == 8.0
     assert record["latent_parameters"]["curvature_fluctuation_target"] == 0.4
@@ -888,6 +907,14 @@ def test_all_components_mode_places_generated_channel_through_finite_z() -> None
     raw["film"]["packing_box_A"]["z"] = 20.0
     raw["generation_controls"]["seed_number_density_A3"] = 1.0 / (100.0 * 100.0 * 20.0)
     raw["formal_targets"]["shape"]["compact_aspect_ratio"] = None
+    for name in (
+        "equivalent_diameter_A",
+        "orientation",
+        "channel_aspect_ratio",
+        "channel_tortuosity",
+        "curvature_fluctuation",
+    ):
+        raw["formal_targets"]["shape"][name] = None
     raw["pore_constraints"] = {"z_connectivity": "all_components"}
     config = GeneratorConfig.model_validate(raw)
     plan = CenterSeedPlan(
@@ -902,6 +929,86 @@ def test_all_components_mode_places_generated_channel_through_finite_z() -> None
     grid = voxelize_geometry(built.geometry, np.array([100.0, 100.0, 20.0]), 2.0)
 
     assert pore_z_connectivity_summary(grid.pore_mask).all_components_through
+
+
+def test_all_components_couples_formal_channel_metrics_to_finite_z() -> None:
+    raw = _geometry_v3_config(seed_count=12).model_dump(mode="python")
+    raw["film"] = {"target_box_A": {"x": 1000.0, "y": 1000.0, "z": 800.0}}
+    raw["generation_controls"]["seed_number_density_A3"] = 12.0 / (
+        1000.0 * 1000.0 * 800.0
+    )
+    raw["generation_controls"]["channel_fraction_by_count"] = 1.0
+    raw["formal_targets"]["shape"]["compact_aspect_ratio"] = None
+    raw["formal_targets"]["shape"]["equivalent_diameter_A"] = {
+        "family": "beta",
+        "alpha": 2.5,
+        "beta": 3.5,
+        "lower": 250.0,
+        "upper": 360.0,
+    }
+    raw["formal_targets"]["shape"]["channel_aspect_ratio"] = {
+        "family": "beta",
+        "alpha": 2.5,
+        "beta": 3.0,
+        "lower": 2.5,
+        "upper": 3.5,
+    }
+    raw["formal_targets"]["shape"]["channel_tortuosity"] = {
+        "family": "beta",
+        "alpha": 2.5,
+        "beta": 3.5,
+        "lower": 1.04,
+        "upper": 1.15,
+    }
+    raw["formal_targets"]["shape"]["orientation"] = {
+        "model": "paired_projected_planes",
+        "components": [
+            {
+                "weight": 1.0,
+                "theta_xz_deg": {
+                    "family": "beta",
+                    "alpha": 4.0,
+                    "beta": 2.0,
+                    "lower": 82.0,
+                    "upper": 89.5,
+                },
+                "theta_xy_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 0.0,
+                    "upper": 30.0,
+                },
+            }
+        ],
+    }
+    raw["pore_constraints"] = {"z_connectivity": "all_components"}
+    for compatibility_key in ("pores", "center_distribution", "compact", "channel", "orientation"):
+        raw.pop(compatibility_key)
+    config = GeneratorConfig.model_validate(raw)
+    points = np.column_stack(
+        [
+            np.linspace(100.0, 900.0, 12),
+            np.full(12, 500.0),
+            np.full(12, 400.0),
+        ]
+    )
+    plan = CenterSeedPlan(
+        intended_points_A=points,
+        target_rdf_xi=np.array([0.0]),
+        target_rdf_values=np.array([1.0]),
+        starting_loss=0.0,
+        initialization_loss=0.0,
+    )
+
+    built = build_units(config, plan, np.random.default_rng(311))
+
+    for channel in built.units:
+        assert isinstance(channel, ChannelUnit)
+        assert np.isclose(np.ptp(channel.centerline_samples_A[:, 2]), 800.0, rtol=1.0e-6)
+        assert 2.5 <= float(channel.latent_eta) <= 3.5
+        assert np.isclose(channel.eta, float(channel.latent_eta), rtol=0.01)
+        assert np.isclose(channel.tortuosity, float(channel.latent_tau), rtol=0.01)
 
 
 def test_all_components_without_orientation_target_uses_z_spanning_default() -> None:

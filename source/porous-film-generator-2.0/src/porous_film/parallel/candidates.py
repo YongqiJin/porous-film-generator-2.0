@@ -264,7 +264,10 @@ def _evaluate(
                     )
                 )
                 if require_channels_through_z and requires_distinct_channel_measurements:
-                    return separate_channel_footprints_xy(scaled)
+                    return separate_channel_footprints_xy(
+                        scaled,
+                        clearance_A=2.0 * float(config.audit.fine_spacing_A),
+                    )
                 return scaled
 
         with profile_stage("scale_optimization"):
@@ -297,7 +300,6 @@ def _calibrate_final_channel_tortuosity(
         config.source_schema_version != 3
         or config.pore_constraints.z_connectivity != "all_components"
         or target_spec is None
-        or config.formal_targets.shape.channel_aspect_ratio is not None
     ):
         return built, fine_grid
 
@@ -342,7 +344,8 @@ def _calibrate_final_channel_tortuosity(
             unit.unit_id: float(factor) for unit, factor in zip(channels, factors, strict=True)
         }
         current_built = separate_channel_footprints_xy(
-            adjust_channel_lateral_deviations_xy(built, factors_by_id)
+            adjust_channel_lateral_deviations_xy(built, factors_by_id),
+            clearance_A=2.0 * float(config.audit.fine_spacing_A),
         )
         current_grid = voxelize_geometry(
             current_built.geometry,

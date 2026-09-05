@@ -639,6 +639,54 @@ def test_all_components_z_mode_preflights_requested_through_track_count() -> Non
         GeneratorConfig.model_validate(config)
 
 
+def test_all_components_z_mode_rejects_jointly_impossible_shape_targets() -> None:
+    config = _schema_v3_config()
+    config["film"]["target_box_A"]["z"] = 20.0
+    config["generation_controls"]["seed_number_density_A3"] = 1.0 / (
+        100.0 * 100.0 * 20.0
+    )
+    config["generation_controls"]["channel_fraction_by_count"] = 1.0
+    config["formal_targets"]["shape"].pop("compact_aspect_ratio")
+    config["formal_targets"]["shape"]["equivalent_diameter_A"] = {
+        "family": "constant",
+        "value": 8.0,
+    }
+    config["formal_targets"]["shape"]["channel_aspect_ratio"] = {
+        "family": "constant",
+        "value": 4.0,
+    }
+    config["formal_targets"]["shape"]["channel_tortuosity"] = {
+        "family": "constant",
+        "value": 1.0,
+    }
+    config["formal_targets"]["shape"]["orientation"] = {
+        "model": "paired_projected_planes",
+        "components": [
+            {
+                "weight": 1.0,
+                "theta_xz_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 80.0,
+                    "upper": 89.0,
+                },
+                "theta_xy_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 0.0,
+                    "upper": 10.0,
+                },
+            }
+        ],
+    }
+    config["pore_constraints"] = {"z_connectivity": "all_components"}
+
+    with pytest.raises(ValueError, match="joint shape targets cannot span finite z"):
+        GeneratorConfig.model_validate(config)
+
+
 def test_unrestricted_z_mode_preflights_requested_through_track_count() -> None:
     config = _schema_v3_config()
     config["pore_constraints"] = {"minimum_through_centerlines": 91}

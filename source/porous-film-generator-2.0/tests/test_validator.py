@@ -20,6 +20,8 @@ from porous_film_validator.validate import (
     _config_schema_version,
     _independent_overlap_fraction,
     _PhaseData,
+    _points_inside_triangle_mesh,
+    _points_inside_triangle_mesh_brute_force,
     _target_compliance,
     _v3_compare_paired_orientation_pairs,
     _v3_distribution_target_result,
@@ -31,6 +33,17 @@ from porous_film_validator.validate import (
 )
 
 runner = CliRunner()
+
+
+def test_indexed_mesh_occupancy_matches_brute_force() -> None:
+    mesh = trimesh.creation.box(extents=[4.0, 5.0, 6.0])
+    rng = np.random.default_rng(20260904)
+    points = rng.uniform(-4.0, 4.0, size=(257, 3))
+
+    expected = _points_inside_triangle_mesh_brute_force(mesh, points)
+    actual = _points_inside_triangle_mesh(mesh, points)
+
+    assert np.array_equal(actual, expected)
 
 
 def test_validator_uses_source_schema_version_for_translated_legacy_config() -> None:
@@ -117,6 +130,11 @@ def test_validator_cli_reports_nonzero_for_incomplete_export(
 
     assert result.exit_code == 1
     assert "NOT_EVALUABLE" in result.stdout or "FAIL" in result.stdout
+    timing_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("Validation time: ")
+    )
+    assert timing_line.endswith(" s")
+    assert float(timing_line.removeprefix("Validation time: ").removesuffix(" s")) >= 0.0
     assert (incomplete_qa_export / "independent-validation.json").exists()
 
 
@@ -940,6 +958,33 @@ def test_validator_accepts_geometry_only_schema_v3_without_molecule_artifacts(
     assert report.independent_metrics["final_geometry"]["through_network_count"] >= 1
 
 
+def test_validator_schema_v3_does_not_gate_constant_radius_generation_control(
+    tmp_path: Path,
+) -> None:
+    qa = _write_schema_v3_geometry_export(tmp_path)
+    unit_id = "constant-radius-channel"
+    centerline = np.column_stack([np.linspace(0.0, 6.0, 7), np.ones(7), np.ones(7)])
+    radii = np.ones(7, dtype=float)
+    record = _channel_v2_record(
+        unit_id,
+        centerline=centerline,
+        radii=radii,
+        equivalent_radius_A=1.0,
+    )
+    (qa / "unit_geometry.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    _write_channel_curves_v2(
+        qa / "channel_curves.h5",
+        {unit_id: (centerline, radii)},
+    )
+    _write_checksums(qa)
+
+    report = validate_export(qa)
+
+    errors = " ".join(report.errors).lower()
+    assert "radius cv" not in errors
+    assert "neck or bulge" not in errors
+
+
 def test_validator_rejects_schema_v3_evidence_tampered_without_phase_change(
     tmp_path: Path,
 ) -> None:
@@ -1507,6 +1552,43 @@ def test_validator_overlap_reconstruction_matches_main_audit() -> None:
     )
 
     assert independent == main
+
+
+def test_validator_overlap_reconstruction_culls_points_outside_unit_support(
+    monkeypatch,
+) -> None:
+    from porous_film.geometry import CompactUnit
+    from porous_film_validator import validate as validator
+
+    units = [
+        CompactUnit.sphere("compact-a", np.array([5.0, 5.0, 5.0]), 1.0),
+        CompactUnit.sphere("compact-b", np.array([15.0, 15.0, 5.0]), 1.0),
+    ]
+    phase = _PhaseData(
+        mask=np.ones((10, 20, 20), dtype=bool),
+        spacing_A=1.0,
+        target_box_A=np.array([20.0, 20.0, 10.0]),
+        origin_A=np.zeros(3),
+    )
+    evaluated_point_count = 0
+    reference = validator._independent_periodic_unit_field
+
+    def counting_field(*args, **kwargs):
+        nonlocal evaluated_point_count
+        points = args[2]
+        evaluated_point_count += int(points.shape[0])
+        return reference(*args, **kwargs)
+
+    monkeypatch.setattr(validator, "_independent_periodic_unit_field", counting_field)
+
+    validator._independent_overlap_fraction(
+        [unit.to_record() for unit in units],
+        {},
+        phase,
+        [],
+    )
+
+    assert evaluated_point_count < 2 * phase.mask.size
 
 
 def test_validator_full_schema_v3_execution_does_not_import_main_package(

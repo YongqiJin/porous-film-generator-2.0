@@ -52,6 +52,49 @@ def cuda_device() -> int:
     return index
 
 
+def recommended_gpu_workload(
+    *,
+    device_name: str,
+    free_memory_bytes: int,
+) -> tuple[int, int]:
+    """Choose a conservative voxel chunk and channel-segment batch from free VRAM.
+
+    The thresholds cover the tested A100/A800 and RTX 4090 configurations while
+    retaining the previous conservative defaults on lower-memory devices.
+    ``device_name`` is accepted so this public policy can evolve for device-specific
+    tuning without changing its API.
+    """
+    free_memory = max(0, int(free_memory_bytes))
+    gib = 1024**3
+    if free_memory >= 48 * gib:
+        return 4_000_000, 64
+    if free_memory >= 28 * gib:
+        return 2_000_000, 64
+    if free_memory >= 18 * gib:
+        return 1_000_000, 64
+    return _DEFAULT_GPU_MAX_POINTS_PER_CHUNK, _DEFAULT_SEGMENT_BATCH_SIZE
+
+
+def _resolve_gpu_workload(
+    *,
+    automatic: tuple[int, int],
+    max_points_per_chunk: int | None,
+) -> tuple[int, int]:
+    automatic_chunk, automatic_segment_batch = automatic
+    configured_chunk = _positive_environment_int(
+        "POROUS_FILM_GPU_MAX_POINTS_PER_CHUNK",
+        automatic_chunk,
+    )
+    if max_points_per_chunk is not None:
+        explicit_chunk = _positive_int(max_points_per_chunk, "max_points_per_chunk")
+        configured_chunk = min(configured_chunk, explicit_chunk)
+    segment_batch_size = _positive_environment_int(
+        "POROUS_FILM_GPU_SEGMENT_BATCH_SIZE",
+        automatic_segment_batch,
+    )
+    return configured_chunk, segment_batch_size
+
+
 def evaluate_sdf_cupy(
     geometry: PoreGeometry,
     points_A: np.ndarray,
@@ -76,7 +119,7 @@ def voxelize_geometry_cupy(
     *,
     counts_xyz: np.ndarray,
     spacing_A: float,
-    max_points_per_chunk: int,
+    max_points_per_chunk: int | None,
     device: int | None = None,
 ) -> np.ndarray:
     cupy = _cupy_module()
@@ -85,33 +128,144 @@ def voxelize_geometry_cupy(
         raise RuntimeError("CUDA voxel backend was requested but CuPy CUDA is unavailable")
     nx, ny, nz = (int(value) for value in np.asarray(counts_xyz, dtype=np.int64))
     total_points = int(nx * ny * nz)
-    configured_chunk = _positive_environment_int(
-        "POROUS_FILM_GPU_MAX_POINTS_PER_CHUNK",
-        _DEFAULT_GPU_MAX_POINTS_PER_CHUNK,
-    )
-    chunk_size = min(int(max_points_per_chunk), configured_chunk)
     flat_mask = np.empty(total_points, dtype=bool)
     with cupy.cuda.Device(selected_device):
+        chunk_size, segment_batch_size = _selected_gpu_workload(
+            cupy,
+            selected_device,
+            max_points_per_chunk=max_points_per_chunk,
+        )
         for start in range(0, total_points, chunk_size):
             stop = min(start + chunk_size, total_points)
             flat_indices = cupy.arange(start, stop, dtype=cupy.int64)
-            x_indices = flat_indices % nx
-            y_indices = (flat_indices // nx) % ny
-            z_indices = flat_indices // (nx * ny)
-            points = cupy.stack(
-                (
-                    (x_indices.astype(cupy.float64) + 0.5) * float(spacing_A),
-                    (y_indices.astype(cupy.float64) + 0.5) * float(spacing_A),
-                    (z_indices.astype(cupy.float64) + 0.5) * float(spacing_A),
-                ),
-                axis=1,
+            points = _voxel_center_points(
+                cupy,
+                flat_indices,
+                nx=nx,
+                ny=ny,
+                spacing_A=spacing_A,
             )
-            occupied = _geometry_occupancy_array(cupy, geometry, points)
+            occupied = _geometry_occupancy_array(
+                cupy,
+                geometry,
+                points,
+                segment_batch_size=segment_batch_size,
+            )
             flat_mask[start:stop] = cupy.asnumpy(occupied)
     return flat_mask.reshape((nz, ny, nx))
 
 
-def _geometry_occupancy_array(cupy: Any, geometry: PoreGeometry, points: Any) -> Any:
+def voxelize_unit_masks_cupy(
+    geometry: PoreGeometry,
+    *,
+    counts_xyz: np.ndarray,
+    spacing_A: float,
+    candidate_mask: np.ndarray,
+    max_points_per_chunk: int | None = None,
+    device: int | None = None,
+) -> tuple[np.ndarray, ...]:
+    """Voxelize each unit only where the already-final pore phase is occupied."""
+    cupy = _cupy_module()
+    selected_device = cuda_device() if device is None else int(device)
+    if not cuda_backend_available():
+        raise RuntimeError("CUDA voxel backend was requested but CuPy CUDA is unavailable")
+    nx, ny, nz = (int(value) for value in np.asarray(counts_xyz, dtype=np.int64))
+    expected_shape = (nz, ny, nx)
+    candidates = np.asarray(candidate_mask, dtype=bool)
+    if candidates.shape != expected_shape:
+        raise ValueError(f"candidate_mask must have shape {expected_shape}, got {candidates.shape}")
+    if not geometry.units:
+        return ()
+    total_points = int(nx * ny * nz)
+    candidate_indices = np.flatnonzero(candidates.ravel())
+    masks = np.zeros((len(geometry.units), total_points), dtype=bool)
+    box = np.asarray(geometry.target_box_A, dtype=float)
+    margin_A = _smooth_min_skip_margin_A(9)
+    with cupy.cuda.Device(selected_device):
+        chunk_size, segment_batch_size = _selected_gpu_workload(
+            cupy,
+            selected_device,
+            max_points_per_chunk=max_points_per_chunk,
+        )
+        for start in range(0, candidate_indices.size, chunk_size):
+            host_indices = candidate_indices[start : start + chunk_size]
+            flat_indices = cupy.asarray(host_indices, dtype=cupy.int64)
+            points = _voxel_center_points(
+                cupy,
+                flat_indices,
+                nx=nx,
+                ny=ny,
+                spacing_A=spacing_A,
+            )
+            for unit_index, unit in enumerate(geometry.units):
+                active = _unit_support_mask(cupy, unit, points, box, margin_A=margin_A)
+                if not bool(cupy.any(active).item()):
+                    continue
+                occupied = cupy.zeros(points.shape[0], dtype=cupy.bool_)
+                occupied[active] = (
+                    _single_unit_sdf_array(
+                        cupy,
+                        unit,
+                        points[active],
+                        box,
+                        segment_batch_size=segment_batch_size,
+                    )
+                    < 0.0
+                )
+                masks[unit_index, host_indices] = cupy.asnumpy(occupied)
+    return tuple(masks[index].reshape(expected_shape) for index in range(len(geometry.units)))
+
+
+def _selected_gpu_workload(
+    cupy: Any,
+    selected_device: int,
+    *,
+    max_points_per_chunk: int | None,
+) -> tuple[int, int]:
+    properties = cupy.cuda.runtime.getDeviceProperties(selected_device)
+    raw_device_name = properties.get("name", "unknown CUDA device")
+    if isinstance(raw_device_name, bytes):
+        device_name = raw_device_name.decode("utf-8", errors="replace")
+    else:
+        device_name = str(raw_device_name)
+    free_memory_bytes, _ = cupy.cuda.runtime.memGetInfo()
+    return _resolve_gpu_workload(
+        automatic=recommended_gpu_workload(
+            device_name=device_name,
+            free_memory_bytes=int(free_memory_bytes),
+        ),
+        max_points_per_chunk=max_points_per_chunk,
+    )
+
+
+def _voxel_center_points(
+    cupy: Any,
+    flat_indices: Any,
+    *,
+    nx: int,
+    ny: int,
+    spacing_A: float,
+) -> Any:
+    x_indices = flat_indices % nx
+    y_indices = (flat_indices // nx) % ny
+    z_indices = flat_indices // (nx * ny)
+    return cupy.stack(
+        (
+            (x_indices.astype(cupy.float64) + 0.5) * float(spacing_A),
+            (y_indices.astype(cupy.float64) + 0.5) * float(spacing_A),
+            (z_indices.astype(cupy.float64) + 0.5) * float(spacing_A),
+        ),
+        axis=1,
+    )
+
+
+def _geometry_occupancy_array(
+    cupy: Any,
+    geometry: PoreGeometry,
+    points: Any,
+    *,
+    segment_batch_size: int,
+) -> Any:
     """Evaluate only points that can lie in a unit's zero-level support.
 
     Voxelization needs the sign of the final smooth-union field, not its positive
@@ -130,7 +284,13 @@ def _geometry_occupancy_array(cupy: Any, geometry: PoreGeometry, points: Any) ->
         active = _unit_support_mask(cupy, unit, points, box, margin_A=margin_A)
         if not bool(cupy.any(active).item()):
             continue
-        field = _single_unit_sdf_array(cupy, unit, points[active], box)
+        field = _single_unit_sdf_array(
+            cupy,
+            unit,
+            points[active],
+            box,
+            segment_batch_size=segment_batch_size,
+        )
         result[active] = _smooth_min_pair(cupy, result[active], field)
     return result < 0.0
 
@@ -140,6 +300,8 @@ def _single_unit_sdf_array(
     unit: CompactUnit | ChannelUnit,
     points: Any,
     box: np.ndarray,
+    *,
+    segment_batch_size: int,
 ) -> Any:
     if isinstance(unit, CompactUnit) and _compact_minimum_image_safe(unit, box):
         return _compact_periodic_sdf(cupy, unit, points, box)
@@ -163,7 +325,16 @@ def _single_unit_sdf_array(
     for x_shift in x_shifts:
         for y_shift in y_shifts:
             offset = cupy.asarray([x_shift, y_shift, 0.0], dtype=cupy.float64)
-            result = _smooth_min_pair(cupy, result, _unit_sdf(cupy, unit, points - offset))
+            result = _smooth_min_pair(
+                cupy,
+                result,
+                _unit_sdf(
+                    cupy,
+                    unit,
+                    points - offset,
+                    segment_batch_size=segment_batch_size,
+                ),
+            )
     return result
 
 
@@ -230,7 +401,12 @@ def _geometry_sdf_array(cupy: Any, geometry: PoreGeometry, points: Any) -> Any:
                         [x_shift, y_shift, 0.0],
                         dtype=cupy.float64,
                     )
-                    field = _unit_sdf(cupy, unit, points - offset)
+                    field = _unit_sdf(
+                        cupy,
+                        unit,
+                        points - offset,
+                        segment_batch_size=_DEFAULT_SEGMENT_BATCH_SIZE,
+                    )
                     unit_field = _smooth_min_pair(cupy, unit_field, field)
         result = _smooth_min_pair(cupy, result, unit_field)
     return result
@@ -251,11 +427,17 @@ def _periodic_shifts(
     return np.arange(first, last + 1, dtype=float) * box_length
 
 
-def _unit_sdf(cupy: Any, unit: CompactUnit | ChannelUnit, points: Any) -> Any:
+def _unit_sdf(
+    cupy: Any,
+    unit: CompactUnit | ChannelUnit,
+    points: Any,
+    *,
+    segment_batch_size: int,
+) -> Any:
     if isinstance(unit, CompactUnit):
         return _compact_sdf(cupy, unit, points)
     if isinstance(unit, ChannelUnit):
-        return _channel_sdf(cupy, unit, points)
+        return _channel_sdf(cupy, unit, points, segment_batch_size=segment_batch_size)
     raise TypeError(f"unsupported pore unit type: {type(unit)!r}")
 
 
@@ -330,15 +512,17 @@ def _compact_sdf(cupy: Any, unit: CompactUnit, points: Any) -> Any:
     )
 
 
-def _channel_sdf(cupy: Any, unit: ChannelUnit, points: Any) -> Any:
+def _channel_sdf(
+    cupy: Any,
+    unit: ChannelUnit,
+    points: Any,
+    *,
+    segment_batch_size: int,
+) -> Any:
     result = cupy.full(points.shape[0], cupy.inf, dtype=cupy.float64)
-    batch_size = _positive_environment_int(
-        "POROUS_FILM_GPU_SEGMENT_BATCH_SIZE",
-        _DEFAULT_SEGMENT_BATCH_SIZE,
-    )
     segment_count = int(unit.segment_lengths_A.size)
-    for first in range(0, segment_count, batch_size):
-        last = min(first + batch_size, segment_count)
+    for first in range(0, segment_count, segment_batch_size):
+        last = min(first + segment_batch_size, segment_count)
         starts = _array(cupy, unit.segment_starts_A[first:last])
         ends = _array(cupy, unit.segment_ends_A[first:last])
         tangents = _array(cupy, unit.segment_tangents_A[first:last])
@@ -354,9 +538,13 @@ def _channel_sdf(cupy: Any, unit: ChannelUnit, points: Any) -> Any:
         axial_raw = cupy.sum(offsets * tangents[:, cupy.newaxis, :], axis=2)
         axial = cupy.maximum(axial_raw, 0.0)
         axial = cupy.minimum(axial, lengths[:, cupy.newaxis])
-        normalized_s = (cumulative[:, cupy.newaxis] + axial) / max(float(unit.arc_length_A), 1.0e-12)
+        normalized_s = (cumulative[:, cupy.newaxis] + axial) / max(
+            float(unit.arc_length_A), 1.0e-12
+        )
         local_radius = _channel_radius(cupy, unit, normalized_s)
-        closest = starts[:, cupy.newaxis, :] + axial[:, :, cupy.newaxis] * tangents[:, cupy.newaxis, :]
+        closest = (
+            starts[:, cupy.newaxis, :] + axial[:, :, cupy.newaxis] * tangents[:, cupy.newaxis, :]
+        )
         radial = cupy.linalg.norm(points[cupy.newaxis, :, :] - closest, axis=2) - local_radius
         start_signed = -cupy.sum(offsets * start_normals[:, cupy.newaxis, :], axis=2)
         end_signed = cupy.sum(
@@ -386,11 +574,14 @@ def _channel_sdf(cupy: Any, unit: ChannelUnit, points: Any) -> Any:
             roughness=float(unit.roughness),
             length_scale_A=float(unit.cross_radius_A),
         )
-        batch_field = -_logsumexp(
-            cupy,
-            -_SMOOTH_UNION_SHARPNESS * fields,
-            axis=0,
-        ) / _SMOOTH_UNION_SHARPNESS
+        batch_field = (
+            -_logsumexp(
+                cupy,
+                -_SMOOTH_UNION_SHARPNESS * fields,
+                axis=0,
+            )
+            / _SMOOTH_UNION_SHARPNESS
+        )
         result = _smooth_min_pair(cupy, result, batch_field)
     first_cap, last_cap = _endpoint_cap_fields(cupy, unit, points)
     result = _smooth_min_pair(cupy, result, first_cap)
@@ -410,10 +601,9 @@ def _channel_radius(cupy: Any, unit: ChannelUnit, normalized_s: Any) -> Any:
     indices = cupy.clip(indices, 0, nodes.size - 2)
     delta = normalized_s - nodes[indices]
     return (
-        ((coefficients[0][indices] * delta + coefficients[1][indices]) * delta + coefficients[2][indices])
-        * delta
-        + coefficients[3][indices]
-    )
+        (coefficients[0][indices] * delta + coefficients[1][indices]) * delta
+        + coefficients[2][indices]
+    ) * delta + coefficients[3][indices]
 
 
 def _endpoint_cap_fields(cupy: Any, unit: ChannelUnit, points: Any) -> tuple[Any, Any]:
@@ -498,10 +688,13 @@ def _logsumexp(cupy: Any, values: Any, *, axis: int) -> Any:
 
 
 def _smooth_min_pair(cupy: Any, first: Any, second: Any) -> Any:
-    return -cupy.logaddexp(
-        -_SMOOTH_UNION_SHARPNESS * first,
-        -_SMOOTH_UNION_SHARPNESS * second,
-    ) / _SMOOTH_UNION_SHARPNESS
+    return (
+        -cupy.logaddexp(
+            -_SMOOTH_UNION_SHARPNESS * first,
+            -_SMOOTH_UNION_SHARPNESS * second,
+        )
+        / _SMOOTH_UNION_SHARPNESS
+    )
 
 
 def _array(cupy: Any, value: Any) -> Any:
@@ -521,9 +714,21 @@ def _positive_environment_int(name: str, default: int) -> int:
     return value
 
 
+def _positive_int(value: int, name: str) -> int:
+    try:
+        integer = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if integer <= 0 or integer != value:
+        raise ValueError(f"{name} must be a positive integer")
+    return integer
+
+
 __all__ = [
     "cuda_backend_available",
     "cuda_device",
     "evaluate_sdf_cupy",
+    "recommended_gpu_workload",
     "voxelize_geometry_cupy",
+    "voxelize_unit_masks_cupy",
 ]

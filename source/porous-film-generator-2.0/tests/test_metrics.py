@@ -1161,6 +1161,51 @@ def test_paired_orientation_audit_rejects_wrong_joint_pairing_with_matching_marg
     assert crossed["unassigned_pair_count"] == 2
 
 
+def test_paired_orientation_audit_skips_redundant_factorized_gate() -> None:
+    shared_xz = {
+        "family": "beta",
+        "alpha": 2.0,
+        "beta": 2.0,
+        "lower": 60.0,
+        "upper": 80.0,
+    }
+    target = {
+        "components": [
+            {
+                "weight": 0.5,
+                "theta_xz_deg": shared_xz,
+                "theta_xy_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 0.0,
+                    "upper": 30.0,
+                },
+            },
+            {
+                "weight": 0.5,
+                "theta_xz_deg": shared_xz,
+                "theta_xy_deg": {
+                    "family": "beta",
+                    "alpha": 2.0,
+                    "beta": 2.0,
+                    "lower": 30.0,
+                    "upper": 60.0,
+                },
+            },
+        ]
+    }
+
+    result = _compare_paired_orientation_pairs(
+        np.array([[81.0, 10.0], [75.0, 40.0], [72.0, 45.0]]),
+        target,
+    )
+
+    assert result is not None
+    assert result["passed"]
+    assert result["joint_gate_required"] is False
+
+
 def test_schema_v3_audit_compares_final_compact_component_eta() -> None:
     z, y, x = np.indices((20, 20, 20), dtype=float)
     mask = ((x + 0.5 - 10.0) / 4.5) ** 2 + ((y + 0.5 - 10.0) / 2.5) ** 2 + (

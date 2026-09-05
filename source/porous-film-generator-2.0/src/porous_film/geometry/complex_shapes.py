@@ -220,7 +220,16 @@ def generate_variable_radius_channel_profile(
         raise ValueError("eta and tau must be at least 1")
     rng = np.random.default_rng(int(shape_seed))
     for _attempt in range(_MAX_SHAPE_ATTEMPTS):
-        profile_s, relative_radii = _generate_relative_radius_profile(rng)
+        if target_diameter is None:
+            profile_s, relative_radii = _generate_relative_radius_profile(rng)
+        else:
+            # A schema-v3 equivalent-diameter target describes the local final
+            # cross sections, not a channel-level RMS hidden under additional
+            # radius modulation.  Variation between sampled channel diameters
+            # realizes that distribution; adding an unrelated 15--30% profile
+            # variation broadens it outside its configured support.
+            profile_s = np.linspace(0.0, 1.0, _CHANNEL_PROFILE_NODE_COUNT)
+            relative_radii = np.ones(_CHANNEL_PROFILE_NODE_COUNT, dtype=float)
         dense_s = np.linspace(0.0, 1.0, 4097)
         relative_dense = PchipInterpolator(profile_s, relative_radii)(dense_s)
         mean_q2 = float(np.trapezoid(relative_dense**2, dense_s))

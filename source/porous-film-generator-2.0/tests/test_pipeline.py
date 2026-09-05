@@ -872,10 +872,13 @@ def test_generate_geometry_cli_retains_inputs(sample_config_path: Path, tmp_path
     assert result.exit_code == 0
     output_lines = result.stdout.strip().splitlines()
     assert output_lines[0].startswith("Result directory: ")
-    assert output_lines[1].startswith("Runtime: ")
+    assert output_lines[1].startswith("Generation time: ")
     assert output_lines[1].endswith(" s")
-    assert float(output_lines[1].removeprefix("Runtime: ").removesuffix(" s")) >= 0.0
-    assert output_lines[2] in {"Audit result: PASS", "Audit result: FAIL"}
+    assert float(output_lines[1].removeprefix("Generation time: ").removesuffix(" s")) >= 0.0
+    assert output_lines[2].startswith("Validation time: ")
+    assert output_lines[2].endswith(" s")
+    assert float(output_lines[2].removeprefix("Validation time: ").removesuffix(" s")) >= 0.0
+    assert output_lines[3] in {"Audit result: PASS", "Audit result: FAIL"}
     run_root = Path(output_lines[0].removeprefix("Result directory: "))
     assert (run_root / "inputs" / "normalized_config.yaml").exists()
     assert (run_root / "inputs" / "argon.pdb").exists()
@@ -894,7 +897,14 @@ def test_generate_cli_copies_original_yaml_byte_identically(
     )
 
     assert result.exit_code == 0, result.stdout
-    run_root = Path(result.stdout.strip())
+    output_lines = result.stdout.strip().splitlines()
+    assert output_lines[0].startswith("Generation time: ")
+    assert output_lines[0].endswith(" s")
+    assert float(output_lines[0].removeprefix("Generation time: ").removesuffix(" s")) >= 0.0
+    assert output_lines[1].startswith("Validation time: ")
+    assert output_lines[1].endswith(" s")
+    assert float(output_lines[1].removeprefix("Validation time: ").removesuffix(" s")) >= 0.0
+    run_root = Path(output_lines[-1])
     copied = run_root / "inputs" / feasible_config_path.name
     assert copied.read_bytes() == original
 

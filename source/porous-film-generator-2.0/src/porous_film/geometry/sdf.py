@@ -765,6 +765,22 @@ def build_units(
         )
         curvature_targets = np.full(count, np.nan, dtype=float)
     orientations = _sample_orientations(config, count, rng)
+    if (
+        config.source_schema_version == 3
+        and config.pore_constraints.z_connectivity == "all_components"
+        and formal_shape.equivalent_diameter_A is not None
+        and formal_shape.orientation is not None
+        and formal_shape.channel_aspect_ratio is not None
+        and formal_shape.channel_tortuosity is not None
+    ):
+        channel_diameters, channel_eta, channel_tau = _couple_z_through_channel_samples(
+            channel_diameters,
+            channel_eta,
+            channel_tau,
+            orientations,
+            target_z_span_A=float(target_box[2]),
+            rng=rng,
+        )
 
     units = []
     realized_anchors = []
@@ -931,7 +947,8 @@ def _position_control_points_through_z(
     samples = _sample_adaptive_spline(controls, radius_A)
     minimum_z = float(np.min(samples[:, 2]))
     maximum_z = float(np.max(samples[:, 2]))
-    if maximum_z - minimum_z < float(target_box_z_A):
+    z_span = maximum_z - minimum_z
+    if z_span < float(target_box_z_A) * (1.0 - 1.0e-10):
         if not allow_lengthening:
             raise ValueError(
                 "sampled channel cannot span z while preserving configured diameter, "
@@ -1518,6 +1535,101 @@ def _sample_channel_tau(
     if tau_spec is None:
         return np.ones(count, dtype=float)
     return stratified_sample(tau_spec, count, rng)
+
+
+def _couple_z_through_channel_samples(
+    diameters_A: np.ndarray,
+    requested_eta: np.ndarray,
+    tau: np.ndarray,
+    orientations: tuple[OrientationSample, ...],
+    *,
+    target_z_span_A: float,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Couple formal marginals so every generated channel can span finite z.
+
+    A final through track obeys ``delta_z = eta * diameter * n_z / tau``.
+    The input contract specifies marginal distributions rather than an
+    impossible independent joint draw, so diameter and tau samples are
+    permuted without changing either marginal.  Eta is then the value implied
+    by the finite-z identity and is fitted to its requested stratified panel.
+    """
+    diameters = np.asarray(diameters_A, dtype=float)
+    eta_targets = np.asarray(requested_eta, dtype=float)
+    tau_values = np.asarray(tau, dtype=float)
+    count = len(orientations)
+    if diameters.shape != (count,) or eta_targets.shape != (count,) or tau_values.shape != (count,):
+        raise ValueError("z-through channel sample arrays must have matching lengths")
+    if count == 0:
+        return diameters.copy(), eta_targets.copy(), tau_values.copy()
+
+    z_fractions = np.asarray(
+        [abs(float(sample.rotation.apply(np.array([1.0, 0.0, 0.0]))[2])) for sample in orientations],
+        dtype=float,
+    )
+    if np.any(z_fractions <= 1.0e-12):
+        raise ValueError("z-through orientation samples must have a nonzero z component")
+
+    diameter_order = rng.permutation(count)
+    tau_order = rng.permutation(count)
+    sorted_targets = np.sort(eta_targets)
+    target_scale = max(float(np.ptp(sorted_targets)), float(np.mean(sorted_targets)) * 0.05, 1.0e-12)
+
+    def realized_eta() -> np.ndarray:
+        return (
+            float(target_z_span_A)
+            * tau_values[tau_order]
+            / (diameters[diameter_order] * z_fractions)
+        )
+
+    def objective() -> float:
+        residual = (np.sort(realized_eta()) - sorted_targets) / target_scale
+        return float(np.mean(residual**2))
+
+    current_score = objective()
+    best_score = current_score
+    best_diameter_order = diameter_order.copy()
+    best_tau_order = tau_order.copy()
+    iterations = max(2_000, min(30_000, 400 * count))
+    initial_temperature = max(current_score, 1.0e-3) * 0.10
+    for iteration in range(iterations):
+        order = diameter_order if rng.random() < 0.5 else tau_order
+        first, second = rng.integers(0, count, size=2)
+        if first == second:
+            continue
+        order[first], order[second] = order[second], order[first]
+        candidate_score = objective()
+        fraction = iteration / max(iterations - 1, 1)
+        temperature = initial_temperature * (1.0e-4**fraction)
+        accept = candidate_score <= current_score or rng.random() < np.exp(
+            (current_score - candidate_score) / max(temperature, 1.0e-15)
+        )
+        if accept:
+            current_score = candidate_score
+            if candidate_score < best_score:
+                best_score = candidate_score
+                best_diameter_order = diameter_order.copy()
+                best_tau_order = tau_order.copy()
+        else:
+            order[first], order[second] = order[second], order[first]
+
+    coupled_diameters = diameters[best_diameter_order]
+    coupled_tau = tau_values[best_tau_order]
+    coupled_eta = (
+        float(target_z_span_A) * coupled_tau / (coupled_diameters * z_fractions)
+    )
+    target_minimum = float(np.min(eta_targets))
+    target_maximum = float(np.max(eta_targets))
+    sampling_margin = 0.02 * max(target_maximum - target_minimum, target_maximum)
+    if (
+        float(np.min(coupled_eta)) < target_minimum - sampling_margin
+        or float(np.max(coupled_eta)) > target_maximum + sampling_margin
+    ):
+        raise ValueError(
+            "joint finite-z calibration could not realize the requested diameter, "
+            "orientation, eta, and tau distributions"
+        )
+    return coupled_diameters, coupled_eta, coupled_tau
 
 
 def _sample_orientations(

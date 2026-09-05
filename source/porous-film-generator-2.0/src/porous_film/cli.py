@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -54,11 +55,18 @@ def _load_config_with_parallel_overrides(
         raise typer.BadParameter(str(exc)) from exc
 
 
-def _echo_geometry_summary(result: GeometryRun) -> None:
+def _validation_seconds(result: GeometryRun) -> float:
     performance = result.performance or {}
-    runtime_seconds = float(performance["total_wall_time_seconds"])
+    inclusive = performance.get("stage_inclusive_seconds", {})
+    if not isinstance(inclusive, dict):
+        return 0.0
+    return max(0.0, float(inclusive.get("validation", 0.0)))
+
+
+def _echo_geometry_summary(result: GeometryRun, generation_seconds: float) -> None:
     typer.echo(f"Result directory: {result.paths.root.resolve()}")
-    typer.echo(f"Runtime: {runtime_seconds:.2f} s")
+    typer.echo(f"Generation time: {generation_seconds:.2f} s")
+    typer.echo(f"Validation time: {_validation_seconds(result):.2f} s")
     typer.echo(f"Audit result: {'PASS' if result.audit.passed else 'FAIL'}")
 
 
@@ -99,8 +107,9 @@ def generate_geometry_cmd(
     )
     paths = create_task_directory(result_root, loaded.task.name, datetime.now(_SHANGHAI))
     prepare_task_inputs(loaded, paths, config_path=config)
+    started_at = time.perf_counter()
     result = generate_geometry(loaded, paths)
-    _echo_geometry_summary(result)
+    _echo_geometry_summary(result, max(0.0, time.perf_counter() - started_at))
 
 
 @app.command("fill-pore")
@@ -131,7 +140,10 @@ def generate_cmd(
         workers=workers,
         no_parallel=no_parallel,
     )
+    started_at = time.perf_counter()
     result = run_full(loaded, result_root, config_path=config)
+    typer.echo(f"Generation time: {max(0.0, time.perf_counter() - started_at):.2f} s")
+    typer.echo(f"Validation time: {_validation_seconds(result.geometry_run):.2f} s")
     typer.echo(str(result.paths.root.resolve()))
 
 

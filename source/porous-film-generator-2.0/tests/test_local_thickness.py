@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -79,6 +81,72 @@ def test_periodic_xy_bounded_slabs_preserve_large_z_radius_feature() -> None:
 
     np.testing.assert_array_equal(bounded, full)
     assert bounded[7, 0, 0] == 8.0
+
+
+def test_periodic_xy_radius_halo_matches_full_tile_below_tile_memory_limit() -> None:
+    mask = np.ones((9, 12, 14), dtype=bool)
+
+    full = local_thickness_field(mask, spacing_A=1.0, periodic_xy=True, max_voxels=100_000)
+    halo_bounded = local_thickness_field(
+        mask,
+        spacing_A=1.0,
+        periodic_xy=True,
+        max_voxels=7_000,
+    )
+
+    np.testing.assert_array_equal(halo_bounded, full)
+    assert halo_bounded[4, 0, 0] == 10.0
+
+
+@pytest.mark.parametrize("max_voxels", [7_000, 100_000])
+def test_periodic_xy_path_avoids_large_binary_morphology(
+    monkeypatch,
+    max_voxels: int,
+) -> None:
+    local_thickness_module = importlib.import_module("porous_film.metrics.local_thickness")
+    mask = np.ones((9, 12, 14), dtype=bool)
+
+    def fail_large_binary_morphology(*_args: object, **_kwargs: object) -> np.ndarray:
+        raise AssertionError("bounded periodic path must use fixed-memory distance transforms")
+
+    monkeypatch.setattr(
+        local_thickness_module.ndimage,
+        "binary_erosion",
+        fail_large_binary_morphology,
+    )
+    monkeypatch.setattr(
+        local_thickness_module.ndimage,
+        "binary_dilation",
+        fail_large_binary_morphology,
+    )
+
+    bounded = local_thickness_field(
+        mask,
+        spacing_A=1.0,
+        periodic_xy=True,
+        max_voxels=max_voxels,
+    )
+
+    assert bounded[4, 0, 0] == 10.0
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_periodic_xy_distance_transform_matches_full_tile_for_random_masks(seed: int) -> None:
+    local_thickness_module = importlib.import_module("porous_film.metrics.local_thickness")
+    rng = np.random.default_rng(seed)
+    mask = rng.random((11, 16, 17)) < 0.45
+    mask[:, 7:10, :2] = True
+    mask[:, 7:10, -2:] = True
+
+    full = local_thickness_module._local_thickness_field_full(
+        mask,
+        1.0,
+        periodic_xy=True,
+        max_voxels=100_000,
+    )
+    bounded = local_thickness_field(mask, spacing_A=1.0, periodic_xy=True, max_voxels=12_000)
+
+    np.testing.assert_array_equal(bounded, full)
 
 
 def test_periodic_xy_bounded_slabs_raise_clear_error_when_radius_cannot_fit() -> None:

@@ -871,6 +871,7 @@ class GeneratorConfig(StrictModel):
                     raise ValueError(
                         "all_components z connectivity requires at least one generated channel"
                     )
+                _validate_joint_z_through_shape_targets(self)
             if self.pore_constraints.minimum_through_centerlines > planned_channel_count:
                 raise ValueError(
                     "minimum_through_centerlines exceeds the planned channel count"
@@ -898,6 +899,85 @@ class GeneratorConfig(StrictModel):
     @property
     def geometry_audit(self) -> AuditSpec:
         return self.audit
+
+
+def _validate_joint_z_through_shape_targets(config: GeneratorConfig) -> None:
+    """Reject formal marginals that cannot describe a final through track.
+
+    For every final through centerline, the measured quantities obey
+
+        delta_z = eta * diameter * n_z / tau
+
+    where ``n_z`` is fixed by the paired projected angles.  Generation-time
+    clipping cannot evade this identity because all five quantities are
+    measured again from the final phase.
+    """
+    shape = config.formal_targets.shape
+    if any(
+        target is None
+        for target in (
+            shape.equivalent_diameter_A,
+            shape.orientation,
+            shape.channel_aspect_ratio,
+            shape.channel_tortuosity,
+        )
+    ):
+        return
+    assert shape.equivalent_diameter_A is not None
+    assert shape.orientation is not None
+    assert shape.channel_aspect_ratio is not None
+    assert shape.channel_tortuosity is not None
+
+    diameter_min = _distribution_lower_support(shape.equivalent_diameter_A)
+    diameter_max = _distribution_upper_support(shape.equivalent_diameter_A)
+    eta_min = _distribution_lower_support(shape.channel_aspect_ratio)
+    eta_max = _distribution_upper_support(shape.channel_aspect_ratio)
+    tau_min = _distribution_lower_support(shape.channel_tortuosity)
+    tau_max = _distribution_upper_support(shape.channel_tortuosity)
+    if not np.all(
+        np.isfinite([diameter_min, diameter_max, eta_min, eta_max, tau_min, tau_max])
+    ):
+        return
+
+    measured_z_span = max(
+        0.0,
+        float(config.film.target_box_A.z) - float(config.audit.fine_spacing_A),
+    )
+    tolerance = max(float(config.audit.fine_spacing_A), 0.01 * measured_z_span)
+    for component_index, component in enumerate(shape.orientation.components):
+        if component.weight <= 0.0:
+            continue
+        theta_xz_min = _distribution_lower_support(component.theta_xz_deg)
+        theta_xz_max = _distribution_upper_support(component.theta_xz_deg)
+        theta_xy_min = _distribution_lower_support(component.theta_xy_deg)
+        theta_xy_max = _distribution_upper_support(component.theta_xy_deg)
+        z_fraction_min = _projected_orientation_z_fraction(
+            theta_xz_min,
+            theta_xy_max,
+        )
+        z_fraction_max = _projected_orientation_z_fraction(
+            theta_xz_max,
+            theta_xy_min,
+        )
+        possible_min = eta_min * diameter_min * z_fraction_min / tau_max
+        possible_max = eta_max * diameter_max * z_fraction_max / tau_min
+        if (
+            possible_min > measured_z_span + tolerance
+            or possible_max < measured_z_span - tolerance
+        ):
+            raise ValueError(
+                "joint shape targets cannot span finite z for paired orientation "
+                f"component {component_index}: required final centerline z span is "
+                f"approximately {measured_z_span:g} A, but eta * diameter * n_z / tau "
+                f"can only span [{possible_min:g}, {possible_max:g}] A"
+            )
+
+
+def _projected_orientation_z_fraction(theta_xz_deg: float, theta_xy_deg: float) -> float:
+    tangent_xz = float(np.tan(np.deg2rad(theta_xz_deg)))
+    tangent_xy = float(np.tan(np.deg2rad(theta_xy_deg)))
+    denominator = float(np.sqrt(1.0 + tangent_xz**2 + tangent_xy**2))
+    return abs(tangent_xz) / denominator
 
 
 def load_config(path: Path) -> GeneratorConfig:

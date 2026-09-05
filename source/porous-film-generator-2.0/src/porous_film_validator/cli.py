@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -25,8 +26,11 @@ def main(
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
 
+    started_at = time.perf_counter()
     report = validate_export(qa_export)
+    validation_seconds = max(0.0, time.perf_counter() - started_at)
     typer.echo(report.status)
+    typer.echo(f"Validation time: {validation_seconds:.2f} s")
     if report.errors:
         for error in report.errors:
             typer.echo(f"ERROR: {error}", err=True)

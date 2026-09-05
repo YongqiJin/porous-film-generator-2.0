@@ -131,7 +131,7 @@ def voxelize_geometry(
     geometry: PoreGeometry,
     box_A: np.ndarray,
     spacing_A: float,
-    max_points_per_chunk: int = 1_000_000,
+    max_points_per_chunk: int | None = None,
 ) -> PhaseGrid:
     with profile_stage("voxelization"):
         return _voxelize_geometry(geometry, box_A, spacing_A, max_points_per_chunk)
@@ -141,11 +141,10 @@ def _voxelize_geometry(
     geometry: PoreGeometry,
     box_A: np.ndarray,
     spacing_A: float,
-    max_points_per_chunk: int,
+    max_points_per_chunk: int | None,
 ) -> PhaseGrid:
     target_box = _as_box(box_A)
     spacing = _positive_float(spacing_A, "spacing_A")
-    chunk_size = _positive_int(max_points_per_chunk, "max_points_per_chunk")
     counts_xyz = _grid_counts_xyz(target_box, spacing)
     backend = _voxel_backend()
     if backend == "cuda":
@@ -157,7 +156,7 @@ def _voxelize_geometry(
             geometry,
             counts_xyz=counts_xyz,
             spacing_A=spacing,
-            max_points_per_chunk=chunk_size,
+            max_points_per_chunk=max_points_per_chunk,
         )
         return PhaseGrid(
             pore_mask=pore_mask,
@@ -165,6 +164,10 @@ def _voxelize_geometry(
             spacing_A=spacing,
             target_box_A=target_box,
         )
+    chunk_size = _positive_int(
+        1_000_000 if max_points_per_chunk is None else max_points_per_chunk,
+        "max_points_per_chunk",
+    )
     nx, ny, nz = (int(value) for value in counts_xyz)
     total_points = int(nx * ny * nz)
     flat_mask = np.empty(total_points, dtype=bool)

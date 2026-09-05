@@ -322,9 +322,8 @@ def _projected_orientation(
             theta_xy_identifiable=False,
         )
     axis = axis / norm
-    if (
-        channel_aspect_ratio is not None
-        and channel_aspect_ratio <= 1.0 + float(aspect_ratio_tolerance)
+    if channel_aspect_ratio is not None and channel_aspect_ratio <= 1.0 + float(
+        aspect_ratio_tolerance
     ):
         return ProjectedOrientationMeasurement(
             track_id=track.track_id,
@@ -415,6 +414,11 @@ def _measure_normal_cross_sections(
     sampled_centerlines: dict[int, tuple[np.ndarray, np.ndarray]],
 ) -> tuple[CrossSectionMeasurement, ...]:
     output: list[CrossSectionMeasurement] = []
+    interpolation_mask = np.pad(
+        grid.pore_mask.astype(float),
+        ((0, 0), (1, 1), (1, 1)),
+        mode="wrap",
+    )
     for track in tracks:
         points, wall_distances = sampled_centerlines[track.track_id]
         if points.shape[0] < 2:
@@ -449,6 +453,15 @@ def _measure_normal_cross_sections(
                 cumulative,
                 float(arc_position),
             )
+            tangent = _local_track_tangent(
+                points,
+                cumulative,
+                float(arc_position),
+                half_window_A=max(
+                    2.0 * float(contract.centerline_sample_spacing_A),
+                    0.5 * float(wall_distance),
+                ),
+            )
             if (
                 branch_arc_positions.size
                 and contract.branch_exclusion_length_A > 0.0
@@ -474,6 +487,7 @@ def _measure_normal_cross_sections(
                     tangent=tangent,
                     wall_distance_A=wall_distance,
                     contract=contract,
+                    interpolation_mask=interpolation_mask,
                 )
             )
     return tuple(output)
@@ -548,6 +562,43 @@ def _interpolate_track(
     return center, tangent, float(wall)
 
 
+def _local_track_tangent(
+    points_A: np.ndarray,
+    cumulative_A: np.ndarray,
+    arc_position_A: float,
+    *,
+    half_window_A: float,
+) -> np.ndarray:
+    """Estimate a section normal without amplifying slice-center quantization."""
+    points = np.asarray(points_A, dtype=float)
+    cumulative = np.asarray(cumulative_A, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or cumulative.shape != (points.shape[0],):
+        raise ValueError("centerline points and cumulative arc lengths must match")
+    if points.shape[0] < 2:
+        raise ValueError("at least two centerline points are required")
+    window = max(float(half_window_A), 1.0e-12)
+    lower = max(float(cumulative[0]), float(arc_position_A) - window)
+    upper = min(float(cumulative[-1]), float(arc_position_A) + window)
+    if upper <= lower:
+        lower = float(cumulative[0])
+        upper = float(cumulative[-1])
+    first = np.asarray(
+        [np.interp(lower, cumulative, points[:, axis]) for axis in range(3)],
+        dtype=float,
+    )
+    second = np.asarray(
+        [np.interp(upper, cumulative, points[:, axis]) for axis in range(3)],
+        dtype=float,
+    )
+    tangent = second - first
+    norm = float(np.linalg.norm(tangent))
+    if norm <= 1.0e-12:
+        index = int(np.clip(np.searchsorted(cumulative, arc_position_A), 1, points.shape[0] - 1))
+        tangent = points[index] - points[index - 1]
+        norm = float(np.linalg.norm(tangent))
+    return tangent / max(norm, 1.0e-12)
+
+
 def _measure_one_cross_section(
     grid: PhaseGrid,
     *,
@@ -557,6 +608,7 @@ def _measure_one_cross_section(
     tangent: np.ndarray,
     wall_distance_A: float,
     contract: MeasurementSpec,
+    interpolation_mask: np.ndarray,
 ) -> CrossSectionMeasurement:
     first_axis, second_axis = _normal_plane_axes(tangent)
     plane_spacing = min(
@@ -579,6 +631,7 @@ def _measure_one_cross_section(
             second_axis=second_axis,
             half_extent_A=extent,
             plane_spacing_A=plane_spacing,
+            interpolation_mask=interpolation_mask,
         )
         if component is None:
             return _invalid_cross_section(
@@ -632,6 +685,7 @@ def _sample_normal_component(
     second_axis: np.ndarray,
     half_extent_A: float,
     plane_spacing_A: float,
+    interpolation_mask: np.ndarray,
 ) -> tuple[np.ndarray | None, np.ndarray]:
     coordinate = np.arange(
         -half_extent_A,
@@ -650,10 +704,10 @@ def _sample_normal_component(
     x_index = (world[:, :, 0] - grid.origin_A[0]) / grid.spacing_A - 0.5
     y_index = (world[:, :, 1] - grid.origin_A[1]) / grid.spacing_A - 0.5
     z_index = (world[:, :, 2] - grid.origin_A[2]) / grid.spacing_A - 0.5
-    x_index = np.mod(x_index, nx)
-    y_index = np.mod(y_index, ny)
+    x_index = np.mod(x_index, nx) + 1.0
+    y_index = np.mod(y_index, ny) + 1.0
     sampled = ndimage.map_coordinates(
-        grid.pore_mask.astype(float),
+        interpolation_mask,
         [z_index, y_index, x_index],
         order=1,
         mode="constant",

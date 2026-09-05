@@ -4,7 +4,11 @@ import numpy as np
 
 from porous_film.config import MeasurementSpec
 from porous_film.metrics import measure_final_geometry
-from porous_film.metrics.final_geometry import _resample_centerline, _smoothed_track_points
+from porous_film.metrics.final_geometry import (
+    _local_track_tangent,
+    _resample_centerline,
+    _smoothed_track_points,
+)
 from porous_film.voxel import PhaseGrid
 
 
@@ -97,6 +101,19 @@ def test_centerline_smoothing_preserves_resolved_tortuosity() -> None:
     assert smoothed_excess >= 0.9 * original_excess
 
 
+def test_local_track_tangent_suppresses_single_voxel_center_jitter() -> None:
+    z = np.arange(9, dtype=float)
+    points = np.column_stack(((-1.0) ** np.arange(9), np.zeros(9), z))
+    cumulative = np.concatenate(
+        ([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+    )
+
+    tangent = _local_track_tangent(points, cumulative, cumulative[4], half_window_A=4.0)
+
+    assert abs(tangent[0]) < 1.0e-12
+    assert tangent[2] > 0.99
+
+
 def test_centerline_sample_spacing_controls_final_channel_arc_measurement() -> None:
     centers = [[(4.0 if z_index % 2 == 0 else 8.0, 6.0)] for z_index in range(12)]
     grid = _grid_from_slice_centers(centers, radius_A=1.4)
@@ -187,6 +204,40 @@ def test_final_geometry_unwraps_a_tilted_track_across_periodic_x() -> None:
     assert np.all(np.diff(track.points_unwrapped_A[:, 0]) >= 0.0)
     assert track.points_unwrapped_A[-1, 0] - track.points_unwrapped_A[0, 0] >= 5.0
     assert track.points_unwrapped_A[-1, 0] > 12.0
+
+
+def test_normal_cross_section_interpolation_is_periodic_at_xy_boundary() -> None:
+    boundary = _grid_from_slice_centers(
+        [[(0.5, 6.0)]] * 20,
+        box_xy_A=(20.0, 20.0),
+        radius_A=3.0,
+    )
+    interior = _grid_from_slice_centers(
+        [[(10.5, 6.0)]] * 20,
+        box_xy_A=(20.0, 20.0),
+        radius_A=3.0,
+    )
+    contract = _measurement_spec(
+        curvature_smoothing_length_A=3.0,
+        surface_exclusion_length_A=2.0,
+    )
+
+    boundary_result = measure_final_geometry(boundary, contract)
+    interior_result = measure_final_geometry(interior, contract)
+    boundary_sections = [section for section in boundary_result.cross_sections if section.valid]
+    interior_sections = [section for section in interior_result.cross_sections if section.valid]
+
+    assert len(boundary_sections) == len(interior_sections)
+    np.testing.assert_allclose(
+        [section.equivalent_diameter_A for section in boundary_sections],
+        [section.equivalent_diameter_A for section in interior_sections],
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        [section.curvature_fluctuation for section in boundary_sections],
+        [section.curvature_fluctuation for section in interior_sections],
+        atol=1.0e-12,
+    )
 
 
 def test_final_geometry_marks_branch_neighborhoods() -> None:

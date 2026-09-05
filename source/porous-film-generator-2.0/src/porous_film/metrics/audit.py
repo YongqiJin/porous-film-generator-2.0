@@ -803,6 +803,22 @@ def _compare_paired_orientation_pairs(
             "sample_count": int(values.shape[0]),
             "unassigned_pair_count": int(values.shape[0]),
             "component_count_errors": {},
+            "joint_gate_required": True,
+        }
+
+    xz_specs = [_as_distribution_dict(component["theta_xz_deg"]) for component in components]
+    xy_specs = [_as_distribution_dict(component["theta_xy_deg"]) for component in components]
+    joint_gate_required = not (
+        all(spec == xz_specs[0] for spec in xz_specs[1:])
+        or all(spec == xy_specs[0] for spec in xy_specs[1:])
+    )
+    if not joint_gate_required:
+        return {
+            "passed": True,
+            "sample_count": int(values.shape[0]),
+            "unassigned_pair_count": 0,
+            "component_count_errors": {},
+            "joint_gate_required": False,
         }
 
     scores = np.full((values.shape[0], len(components)), -np.inf, dtype=float)
@@ -844,6 +860,7 @@ def _compare_paired_orientation_pairs(
         "sample_count": int(values.shape[0]),
         "unassigned_pair_count": int(np.count_nonzero(unassigned)),
         "component_count_errors": errors,
+        "joint_gate_required": True,
     }
 
 
@@ -1314,6 +1331,18 @@ def _unit_occupancy_masks(
     if not built.units:
         return ()
     if np.allclose(grid.origin_A, 0.0, rtol=0.0, atol=0.0):
+        from porous_film.voxel.grid import _voxel_backend
+
+        if _voxel_backend() == "cuda":
+            from porous_film.voxel.cupy_backend import voxelize_unit_masks_cupy
+
+            counts_xyz = np.asarray(grid.pore_mask.shape[::-1], dtype=int)
+            return voxelize_unit_masks_cupy(
+                built.geometry,
+                counts_xyz=counts_xyz,
+                spacing_A=grid.spacing_A,
+                candidate_mask=grid.pore_mask,
+            )
         return tuple(
             voxelize_geometry(
                 PoreGeometry([unit], built.geometry.target_box_A),

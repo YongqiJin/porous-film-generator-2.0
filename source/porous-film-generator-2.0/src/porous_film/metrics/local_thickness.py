@@ -49,9 +49,6 @@ def local_thickness_field(
             )
         return _local_thickness_field_full(mask, spacing, periodic_xy=False, max_voxels=limit)
 
-    full_temporary_voxels = int((mask.shape[0] + 2) * (3 * mask.shape[1]) * (3 * mask.shape[2]))
-    if full_temporary_voxels <= limit:
-        return _local_thickness_field_full(mask, spacing, periodic_xy=True, max_voxels=limit)
     return _local_thickness_field_periodic_slabs(mask, spacing, max_voxels=limit)
 
 
@@ -187,23 +184,30 @@ def _local_thickness_field_periodic_slabs(
 ) -> np.ndarray:
     nz, ny, nx = mask.shape
     field = np.zeros(mask.shape, dtype=float)
-    max_radius = _z_open_radius_upper_bound(mask)
-    tiled_yx = 9 * ny * nx
+    radius_upper_bound = _z_open_radius_upper_bound(mask)
+    radius_map = _periodic_integer_radius_map(
+        mask,
+        radius_upper_bound=radius_upper_bound,
+        max_voxels=max_voxels,
+    )
+    max_radius = int(np.max(radius_map))
 
     for radius in range(max_radius, 0, -1):
-        footprint = _sphere_footprint(radius, max_voxels=max_voxels)
+        exact_radius_centers = radius_map == radius
+        if not np.any(exact_radius_centers):
+            continue
+        halo_yx = (ny + 2 * radius) * (nx + 2 * radius)
         slab_depth = _periodic_slab_depth_for_radius(
             radius,
-            tiled_yx=tiled_yx,
+            halo_yx=halo_yx,
             max_voxels=max_voxels,
         )
         diameter = 2.0 * radius * spacing
         for z0 in range(0, nz, slab_depth):
             z1 = min(nz, z0 + slab_depth)
             source0, source1, coverage = _periodic_radius_coverage_for_core_center_slab(
-                mask,
+                exact_radius_centers,
                 radius=radius,
-                footprint=footprint,
                 z0=z0,
                 z1=z1,
                 max_voxels=max_voxels,
@@ -214,49 +218,84 @@ def _local_thickness_field_periodic_slabs(
     return field
 
 
-def _periodic_radius_coverage_for_core_center_slab(
+def _periodic_integer_radius_map(
     mask: np.ndarray,
     *,
+    radius_upper_bound: int,
+    max_voxels: int,
+) -> np.ndarray:
+    nz, ny, nx = mask.shape
+    radius = _positive_int(radius_upper_bound, "radius_upper_bound")
+    temporary_voxels = (nz + 2) * (ny + 2 * radius) * (nx + 2 * radius)
+    _raise_if_temporary_exceeds_limit(
+        temporary_voxels,
+        radius=radius,
+        max_voxels=max_voxels,
+    )
+    xy_wrapped_mask = np.pad(
+        mask,
+        ((0, 0), (radius, radius), (radius, radius)),
+        mode="wrap",
+    )
+    analysis_mask = np.pad(
+        xy_wrapped_mask,
+        ((1, 1), (0, 0), (0, 0)),
+        mode="constant",
+        constant_values=False,
+    )
+    distances = ndimage.distance_transform_edt(analysis_mask)
+    central_distances = distances[
+        1 : 1 + nz,
+        radius : radius + ny,
+        radius : radius + nx,
+    ]
+    radius_map = np.floor(central_distances).astype(np.int32)
+    radius_map[~mask] = 0
+    return radius_map
+
+
+def _periodic_radius_coverage_for_core_center_slab(
+    exact_radius_centers: np.ndarray,
+    *,
     radius: int,
-    footprint: np.ndarray,
     z0: int,
     z1: int,
     max_voxels: int,
 ) -> tuple[int, int, np.ndarray]:
-    _nz, ny, nx = mask.shape
+    _nz, ny, nx = exact_radius_centers.shape
     source0 = max(0, z0 - radius)
-    source1 = min(mask.shape[0], z1 + radius)
+    source1 = min(exact_radius_centers.shape[0], z1 + radius)
     pad_before = max(0, radius - z0)
-    pad_after = max(0, z1 + radius - mask.shape[0])
-    analysis_mask = np.pad(
-        np.tile(mask[source0:source1], (1, 3, 3)),
-        ((pad_before, pad_after), (0, 0), (0, 0)),
-        constant_values=False,
+    pad_after = max(0, z1 + radius - exact_radius_centers.shape[0])
+    analysis_centers = np.zeros(
+        (source1 - source0 + pad_before + pad_after, ny, nx),
+        dtype=bool,
     )
-    _raise_if_temporary_exceeds_limit(
-        analysis_mask.size,
-        radius=radius,
-        max_voxels=max_voxels,
-    )
-
-    eroded = ndimage.binary_erosion(analysis_mask, structure=footprint, border_value=0)
     core_start = pad_before + (z0 - source0)
     core_stop = core_start + (z1 - z0)
-    valid_core_centers = eroded[core_start:core_stop, ny : 2 * ny, nx : 2 * nx]
-    centers = np.zeros_like(analysis_mask, dtype=bool)
-    centers[core_start:core_stop] = np.tile(valid_core_centers, (1, 3, 3))
-    tiled_centers = centers
+    core_centers = exact_radius_centers[z0:z1]
+    source_start = pad_before
+    source_stop = source_start + (source1 - source0)
+    if not np.any(core_centers):
+        return source0, source1, np.zeros((source1 - source0, ny, nx), dtype=bool)
+    analysis_centers[core_start:core_stop] = core_centers
+    wrapped_centers = np.pad(
+        analysis_centers,
+        ((0, 0), (radius, radius), (radius, radius)),
+        mode="wrap",
+    )
     _raise_if_temporary_exceeds_limit(
-        tiled_centers.size,
+        wrapped_centers.size,
         radius=radius,
         max_voxels=max_voxels,
     )
-
-    dilated = ndimage.binary_dilation(tiled_centers, structure=footprint, border_value=0)
-    source_start = pad_before
-    source_stop = source_start + (source1 - source0)
-    coverage = dilated[source_start:source_stop, ny : 2 * ny, nx : 2 * nx]
-    return source0, source1, coverage & mask[source0:source1]
+    distances_to_center = ndimage.distance_transform_edt(~wrapped_centers)
+    coverage = distances_to_center[
+        source_start:source_stop,
+        radius : radius + ny,
+        radius : radius + nx,
+    ] < float(radius)
+    return source0, source1, coverage
 
 
 def _write_sphere(
@@ -327,13 +366,13 @@ def _raise_if_footprint_exceeds_limit(radius: int, max_voxels: int) -> None:
 def _periodic_slab_depth_for_radius(
     radius: int,
     *,
-    tiled_yx: int,
+    halo_yx: int,
     max_voxels: int,
 ) -> int:
-    available_z = max_voxels // tiled_yx
+    available_z = max_voxels // halo_yx
     slab_depth = available_z - 2 * radius
     if slab_depth < 1:
-        needed = (2 * radius + 1) * tiled_yx
+        needed = (2 * radius + 1) * halo_yx
         raise ValueError(
             "periodic local-thickness memory limit exceeded for "
             f"radius {radius}: one core z slab with halo needs {needed} "
